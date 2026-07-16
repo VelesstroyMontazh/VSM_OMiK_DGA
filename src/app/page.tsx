@@ -65,11 +65,14 @@ export default function DashboardPage() {
   const { activeTab, sidebarOpen, setActiveTab, setSidebarOpen, dbLoaded, dbRows, setDbLoaded } = useAppStore();
   const { theme, setTheme } = useTheme();
   const [currentTime, setCurrentTime] = useState('');
+  const [greeting, setGreeting] = useState('');
   const [mounted, setMounted] = useState(false);
   const [dbStatus, setDbStatus] = useState<'loading' | 'loaded' | 'empty'>('loading');
 
   useEffect(() => {
     requestAnimationFrame(() => setMounted(true));
+    const h = new Date().getHours();
+    setGreeting(h < 6 ? 'Доброй ночи' : h < 12 ? 'Доброе утро' : h < 18 ? 'Добрый день' : 'Добрый вечер');
     const tick = () => setCurrentTime(new Date().toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }));
     tick();
     const interval = setInterval(tick, 1000);
@@ -297,7 +300,7 @@ export default function DashboardPage() {
                 <Menu className="h-5 w-5" />
               </button>
               <div className="hidden sm:block">
-                <p className="text-sm font-medium">{getGreeting()}, <span className="text-emerald-600 dark:text-emerald-400">Администратор</span></p>
+                <p className="text-sm font-medium">{mounted ? greeting : ''}, <span className="text-emerald-600 dark:text-emerald-400">Администратор</span></p>
                 <p className="text-[11px] text-muted-foreground flex items-center gap-1.5">
                   <Clock className="h-3 w-3" />
                   {mounted ? currentTime : '...'}
