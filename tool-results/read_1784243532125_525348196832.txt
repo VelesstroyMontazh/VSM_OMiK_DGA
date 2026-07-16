@@ -1,0 +1,1916 @@
+     1→# VSM ОМиК — Полная документация системы
+     2→
+     3→> **Версия:** 1.2
+     4→> **Организация:** ООО «ВелесстройМонтаж» — Отдел мобилизации и координации персонала (ОМиК)
+     5→> **Репозиторий:** https://github.com/VelesstroyMontazh/VSM_OMIK_2
+     6→> **Обновлено:** Domain tables + Worker pool + DuckDB + Архивация
+     7→
+     8→---
+     9→
+    10→## Содержание
+    11→
+    12→1. [Общее описание системы](#1-общее-описание-системы)
+    13→2. [Архитектура и технологический стек](#2-архитектура-и-технологический-стек)
+    14→3. [Структура проекта](#3-структура-проекта)
+    15→4. [База данных (Prisma/SQLite)](#4-база-данных-prismasqlite)
+    16→5. [Аутентификация и многопользовательский режим](#5-аутентификация-и-многопользовательский-режим)
+    17→6. [SQLite WAL: настройка для 20 пользователей](#6-sqlite-wal-настройка-для-20-пользователей)
+    18→7. [Worker Thread Pool](#7-worker-thread-pool)
+    19→8. [DuckDB: аналитические запросы](#8-duckdb-аналитические-запросы)
+    20→9. [Архивация: месячные архивы](#9-архивация-месячные-архивы)
+    21→10. [Состояние приложения (Zustand Stores)](#10-состояние-приложения-zustand-stores)
+    22→11. [Вкладки и панели — подробное описание](#11-вкладки-и-панели--подробное-описание)
+    23→12. [API-маршруты — полный справочник](#12-api-маршруты--полный-справочник)
+    24→13. [Серверная обработка Excel](#13-серверная-обработка-excel)
+    25→14. [Python-утилиты](#14-python-утилиты)
+    26→15. [Боковая панель (Sidebar)](#15-боковая-панель-sidebar)
+    27→16. [Главная страница (Dashboard)](#16-главная-страница-dashboard)
+    28→17. [Темы оформления](#17-темы-оформления)
+    29→18. [Инфраструктура и развёртывание](#18-инфраструктура-и-развёртывание)
+    30→19. [Локальный запуск на Windows](#19-локальный-запуск-на-windows)
+    31→20. [Потоки данных и связи между модулями](#20-потоки-данных-и-связи-между-модулями)
+    32→21. [Известные проблемы и ограничения](#21-известные-проблемы-и-ограничения)
+    33→22. [Планы развития](#22-планы-развития)
+    34→
+    35→---
+    36→
+    37→## 1. Общее описание системы
+    38→
+    39→**VSM ОМиК** — корпоративная информационная система для отдела мобилизации и координации персонала строительной компании «ВелесстройМонтаж». Система обеспечивает:
+    40→
+    41→- **Управление базой данных сотрудников** (113,000+ записей из 1С)
+    42→- **Учёт затрат на авиа- и ЖД-билеты** (организации ВСП и СК)
+    43→- **Ежедневный учёт персонала** (на объекте, в командировке, в отпуске)
+    44→- **Календарь прилёта-вылета** (отслеживание перемещений)
+    45→- **Автоматизированную обработку данных** (24 Python-утилиты)
+    46→- **Файловый менеджер** (загрузка, просмотр, удаление, каталогизация)
+    47→- **Систему оценок KPI** (рейтинг персонала)
+    48→- **Генерацию отчётов** (по трудоустройству, увольнениям, мобилизации)
+    49→- **Многопользовательский режим** — до 20 одновременных пользователей с изоляцией рабочих пространств
+    50→- **Аутентификацию** — вход по логину/паролю (NextAuth.js + bcrypt)
+    51→
+    52→Система построена как **одностраничное приложение (SPA)** с боковой навигацией и динамической загрузкой панелей. Основные данные сотрудников хранятся в памяти сервера (in-memory cache) для быстрого доступа; метаданные файлов, пользователи и аудит-логи — в SQLite через Prisma ORM.
+    53→
+    54→---
+    55→
+    56→## 2. Архитектура и технологический стек
+    57→
+    58→### 2.1. Высокоуровневая архитектура
+    59→
+    60→```
+    61→┌──────────────────────────────────────────────────────────────────┐
+    62→│                        Браузер (Client)                          │
+    63→│  ┌──────────────┐  ┌──────────────┐  ┌────────────────────────┐ │
+    64→│  │  React 19    │  │  Zustand     │  │  Shadcn/UI Components  │ │
+    65→│  │  Next.js 16  │  │  Stores      │  │  (50+ компонентов)     │ │
+    66→│  └──────┬───────┘  └──────┬───────┘  └────────────────────────┘ │
+    67→│         │                 │                                      │
+    68→│         └────────┬────────┘                                      │
+    69→└──────────────────┼───────────────────────────────────────────────┘
+    70→                   │ fetch() / JSON+base64 + JWT cookie
+    71→┌──────────────────┼───────────────────────────────────────────────┐
+    72→│                  ▼     Сервер (Node.js / Bun)                    │
+    73→│  ┌───────────────────────────────────────────────────────────┐   │
+    74→│  │              Next.js 16 (App Router, port 3000)           │   │
+    75→│  │  ┌─────────────┐  ┌───────────────┐  ┌────────────────┐  │   │
+    76→│  │  │ API Routes  │  │ excel-server  │  │  Prisma ORM    │  │   │
+    77→│  │  │ /api/*      │  │ (55KB, in-mem)│  │  (SQLite WAL)  │  │   │
+    78→│  │  └──────┬──────┘  └───────┬───────┘  └───────┬────────┘  │   │
+    79→│  │         │                 │                    │           │   │
+    80→│  │  ┌──────┴──────┐          │                    │           │   │
+    81→│  │  │ NextAuth.js │          │                    │           │   │
+    82→│  │  │ /api/auth/* │          │                    │           │   │
+    83→│  │  └─────────────┘          │                    │           │   │
+    84→│  │         │                 │                    │           │   │
+    85→│  │         └────────┬────────┘                    │           │   │
+    86→│  │                  ▼                             │           │   │
+    87→│  │  ┌─────────────────────────────┐               │           │   │
+    88→│  │  │  /upload/ (файловая система)│               │           │   │
+    89→│  │  └─────────────────────────────┘               │           │   │
+    90→│  └───────────────────────────────────────────────────────────┘   │
+    91→│                                                                  │
+    92→│  ┌───────────────────────────────────────────────────────────┐   │
+    93→│  │  Caddy Reverse Proxy (port 81 → :3000)                    │   │
+    94→│  │  XTransformPort query для маршрутизации на другие порты   │   │
+    95→│  └───────────────────────────────────────────────────────────┘   │
+    96→└──────────────────────────────────────────────────────────────────┘
+    97→```
+    98→
+    99→### 2.2. Технологический стек
+   100→
+   101→| Категория | Технология | Версия | Назначение |
+   102→|-----------|-----------|--------|-----------|
+   103→| **Фреймворк** | Next.js (App Router) | 16.x | SSR/SSG, API routes, routing |
+   104→| **Язык** | TypeScript | 5.x | Типобезопасность |
+   105→| **Runtime** | Bun | latest | Выполнение, пакетный менеджер |
+   106→| **UI** | React | 19.x | Компонентная модель |
+   107→| **Стилизация** | Tailwind CSS | 4.x | Utility-first CSS |
+   108→| **Компоненты** | Shadcn/UI (New York) | latest | 50+ UI-примитивов на Radix UI |
+   109→| **Иконки** | Lucide React | 0.525+ | 1500+ SVG-иконок |
+   110→| **Состояние** | Zustand | 5.x | Клиентский стейт-менеджмент |
+   111→| **Серверные данные** | TanStack Query | 5.x | Кеширование серверных запросов |
+   112→| **Таблицы** | TanStack Table | 8.x | Виртуализация, сортировка, фильтры |
+   113→| **ORM** | Prisma | 6.11.1 (пин) | Доступ к SQLite |
+   114→| **БД** | SQLite (WAL mode) | — | Персистентное хранение, многопользовательский доступ |
+   115→| **Excel** | SheetJS (xlsx) | 0.18.5 | Чтение/запись XLSX/XLS файлов |
+   116→| **Графики** | Recharts | 2.x | Визуализация данных |
+   117→| **Анимации** | Framer Motion | 12.x | Плавные переходы |
+   118→| **Формы** | React Hook Form + Zod | 7.x / 4.x | Валидация форм |
+   119→| **Drag & Drop** | dnd-kit | 6.x | Перетаскивание элементов |
+   120→| **Аутентификация** | NextAuth.js | 4.24.11 | JWT-сессии (8ч), credentials provider |
+   121→| **Хеширование паролей** | bcryptjs | 3.0.3 | bcrypt с salt rounds = 10 |
+   122→| **AI SDK** | z-ai-web-dev-sdk | 0.0.17 | LLM, VLM, TTS, ASR, генерация изображений |
+   123→| **Реверс-прокси** | Caddy | — | Маршрутизация, HTTPS |
+   124→| **OLAP Аналитика** | DuckDB | 1.4.4 | In-process OLAP, чтение SQLite через sqlite_scan() |
+   125→| **Архивация (subprocess)** | better-sqlite3 | 12.x | Прямой доступ к SQLite в отдельном процессе |
+   126→
+   127→### 2.3. Ключевые архитектурные решения
+   128→
+   129→1. **In-memory кеш вместо полной БД** — Основная база сотрудников (113K+ записей) хранится в оперативной памяти через `globalThis` для переживания HMR. SQLite используется для метаданных файлов, пользователей и аудита.
+   130→
+   131→2. **JSON+base64 вместо multipart/form-data** — Caddy-прокси ломает multipart-запросы, поэтому все загрузки файлов используют JSON с base64-кодированием.
+   132→
+   133→3. **Динамический импорт панелей** — Все панели загружаются через `next/dynamic` с `ssr: false` для уменьшения размера начального бандла.
+   134→
+   135→4. **Декомиссия FastAPI** — Изначально система имела Python FastAPI бэкенд на порту 3031. Вся логика перенесена в `excel-server.ts` (Node.js), Python-бэкенд не запускается.
+   136→
+   137→5. **Worker Thread для тяжёлых операций** — Загрузка основной базы данных вынесена в Worker Thread для предотвращения блокировки event loop.
+   138→
+   139→6. **SQLite WAL + retry** — Для поддержки 20 одновременных пользователей включён WAL-режим, `busy_timeout=10с`, `synchronous=NORMAL`, и реализован `withRetry()` wrapper с экспоненциальной задержкой (см. раздел 6).
+   140→
+   141→7. **Многопользовательская изоляция** — Каждая модель данных имеет поле `userId` для привязки к пользователю. Поле `workspace` на User позволяет группировать пользователей по рабочим пространствам (например, `vsm`, `sk`, `default`).
+   142→
+   143→---
+   144→
+   145→## 3. Структура проекта
+   146→
+   147→```
+   148→/home/z/my-project/
+   149→│
+   150→├── .env                                    # DATABASE_URL, NEXTAUTH_URL, NEXTAUTH_SECRET
+   151→├── Caddyfile                               # Реверс-прокси: :81 → :3000
+   152→├── package.json                            # Зависимости и скрипты
+   153→├── next.config.ts                          # standalone output, 100MB body limit, turbopackUseSystemTlsCerts
+   154→├── tsconfig.json                           # TypeScript конфигурация
+   155→├── tailwind.config.ts                      # Tailwind CSS конфигурация
+   156→├── components.json                         # Shadcn/UI: new-york стиль
+   157→│
+   158→├── prisma/
+   159→│   ├── schema.prisma                       # 8 моделей: User, ExcelFile, MainDatabase, TicketCost, Macro, Operation, TicketExpense, FileRecord, RatingPeriod
+   160→│   └── seed.ts                             # Создание admin/admin123, user1/user123, user2/user123
+   161→│
+   162→├── db/
+   163→│   ├── custom.db                           # SQLite файл базы данных (WAL mode)
+   164→│   ├── custom.db-wal                       # Write-Ahead Log (создаётся автоматически)
+   165→│   └── custom.db-shm                       # Shared memory (создаётся автоматически)
+   166→│
+   167→├── upload/                                 # Директория загруженных файлов
+   168→│   ├── main-database/                      #   Файлы основной базы
+   169→│   ├── tickets_costs/
+   170→│   │   ├── vsm/                            #   Билеты организации ВСП
+   171→│   │   └── sk/                             #   Билеты организации СК
+   172→│   └── general/                            #   Прочие загруженные файлы
+   173→│
+   174→├── download/                               # Директория скачивания
+   175→│
+   176→├── utilities/                              # 24 Python-утилиты
+   177→│   ├── ExcelHeaderComparator.py
+   178→│   ├── Ticket_Parse.py
+   179→│   ├── XLSB_to_XLSX.py
+   180→│   ├── file_organizer.py / file_organizer2.py
+   181→│   ├── file_renamer.py / rename_tool.py
+   182→│   ├── folderforge_pro_v3.py
+   183→│   ├── outlook_app.py
+   184→│   ├── translit_passport.py
+   185→│   ├── АвиаЖД_билеты_(из_pdf_в_Excel).py
+   186→│   ├── Транслит_ФИО_RU_EN.py
+   187→│   ├── Создание_папок.py
+   188→│   └── [и другие...]
+   189→│
+   190→├── mini-services/
+   191→│   └── excel-service/                      # Python FastAPI бэкенд (ДЕКОМИССИРОВАН)
+   192→│       ├── app.py                          #   FastAPI основное приложение
+   193→│       ├── main_db.py                      #   Операции с основной базой
+   194→│       ├── tickets.py / tickets_costs.py / tickets_db.py
+   195→│       ├── daily_tracking.py / daily_validation.py
+   196→│       ├── excel_handler.py / excel_libs.py
+   197→│       ├── data_merge.py / data_ops.py
+   198→│       ├── references.py / reports.py
+   199→│       ├── vba_lab.py / macro_engine.py
+   200→│       ├── python_handler.py
+   201→│       ├── integration_ops.py
+   202→│       ├── gelendzhik_report.py
+   203→│       ├── welcome_settings.py / calendar_db.py
+   204→│       ├── browse_dialog.py                #   Stub (tkinter недоступен в headless)
+   205→│       ├── auth_middleware.py
+   206→│       ├── celery_app.py / celery_tasks.py / task_queue.py
+   207→│       ├── deps.py / data_paths.py
+   208→│       ├── routers/                        #   API-роутеры
+   209→│       ├── requirements.txt                #   Python-зависимости
+   210→│       └── run.sh / start.sh               #   Скрипты запуска
+   211→│
+   212→├── scripts/
+   213→│   ├── excel-loader.cjs                    # Child-process Excel загрузчик (Node.js)
+   214→│   └── archive.js                          # ✅ Standalone архивация (better-sqlite3, subprocess)
+   215→│
+   216→└── src/
+   217→    ├── app/
+   218→    │   ├── globals.css                     # 3 темы, анимации, утилиты
+   219→    │   ├── layout.tsx                      # Root layout: ThemeProvider + AuthProvider + Toaster
+   220→    │   ├── page.tsx                        # Главная SPA-страница (~1100 строк)
+   221→    │   ├── login/
+   222→    │   │   └── page.tsx                    # ✅ Страница входа (NextAuth credentials)
+   223→    │   └── api/                            # API-маршруты
+   224→    │       ├── route.ts                    #   GET → "Hello, world!"
+   225→    │       ├── health/route.ts             #   GET → healthCheck()
+   226→    │       ├── auth/
+   227→    │       │   └── [...nextauth]/route.ts  #   ✅ NextAuth.js handler (credentials provider)
+   228→    │       ├── [...path]/route.ts          #   Catch-all 404 (бывший FastAPI прокси)
+   229→    │       ├── main-db/                    #   6 подмаршрутов
+   230→    │       ├── main-database/              #   2 подмаршрута (Prisma)
+   231→    │       ├── tickets/                    #   13 подмаршрутов
+   232→    │       ├── ticket-expenses/            #   1 подмаршрут (list)
+   233→    │       ├── excel/                      #   4 подмаршрута
+   234→    │       ├── excel-proxy/                #   Прокси к localhost:3031 (legacy)
+   235→    │       ├── daily-accounting/           #   1 подмаршрут (list)
+   236→    │       ├── reports/                    #   2 подмаршрута (filters, generate)
+   237→    │       ├── utilities/                  #   GET (list/source/download), POST (execute)
+   238→    │       └── files/                      #   Файловый менеджер: GET, DELETE, POST
+   239→    │
+   240→    ├── components/
+   241→    │   ├── AppSidebar.tsx                  # Боковая панель: 4 группы, 20 пунктов навигации
+   242→    │   ├── Sidebar.tsx                     # Legacy боковая панель
+   243→    │   ├── GlobalStatusBar.tsx             # Глобальная строка состояния
+   244→    │   ├── ThemeProvider.tsx               # Провайдер темы (next-themes)
+   245→    │   ├── ThemeInitializer.tsx            # Инициализация темы на клиенте
+   246→    │   ├── auth-provider.tsx               # ✅ SessionProvider (next-auth/react)
+   247→    │   ├── theme-toggle.tsx               # Переключатель темы
+   248→    │   ├── panels/                         # 32 компонента-панели
+   249→    │   │   ├── MainDatabasePanel.tsx       #   ✅ Браузер базы сотрудников + отчёты
+   250→    │   │   ├── TicketExpensesPanel.tsx     #   ✅ Управление затратами на билеты (ВСП + СК)
+   251→    │   │   ├── CalendarPanel.tsx           #   ✅ Календарь Прилёт-Вылет
+   252→    │   │   ├── DailyTrackingPanel.tsx      #   ✅ Ежедневный учёт персонала
+   253→    │   │   ├── SettingsPanel.tsx           #   ✅ Настройки системы (4 подвкладки)
+   254→    │   │   ├── UtilitiesPanel.tsx          #   ✅ Python-утилиты + запуск приложений
+   255→    │   │   ├── FileManagerPanel.tsx        #   ✅ Файловый менеджер
+   256→    │   │   ├── RatingsPanel.tsx            #   ✅ Система оценок KPI
+   257→    │   │   ├── UnderDevelopment.tsx        #   ✅ Заглушка для модулей в разработке
+   258→    │   │   └── [и другие...]
+   259→    │   └── ui/                             # 50+ Shadcn/UI примитивов
+   260→    │
+   261→    ├── hooks/
+   262→    │   ├── use-mobile.ts                   # Определение мобильного устройства
+   263→    │   ├── use-theme.ts                    # Хук темы
+   264→    │   └── use-toast.ts                    # Хук уведомлений
+   265→    │
+   266→    ├── lib/
+   267→    │   ├── db.ts                           # ✅ Prisma Client + WAL + busy_timeout + withRetry()
+   268→    │   ├── auth.ts                         # ✅ getCurrentUser() для server components
+   269→    │   ├── worker-pool.ts                  # ✅ Worker Thread Pool (4 воркера, FIFO, прогресс)
+   270→    │   ├── duckdb.ts                       # ✅ DuckDB аналитика (sqlite_scan, cross-period)
+   271→    │   ├── archive.ts                      # ✅ Месячная архивация (archive-YYYY-MM.db)
+   272→    │   ├── workers/
+   273→    │   │   └── excel-parser.worker.ts      # ✅ Worker: парсинг Excel (4 типа задач)
+   274→    │   ├── excel-backend.ts                # FastAPI клиент (localhost:3031, legacy)
+   275→    │   ├── excel-server.ts                 # Ядро обработки Excel (55KB!)
+   276→    │   ├── safe-fetch.ts                   # Безопасный JSON-fetch с обработкой ошибок
+   277→    │   ├── upload-helper.ts                # Утилита загрузки файлов (в /upload)
+   278→    │   └── utils.ts                        # cn(), formatDateDDMMYYYY(), formatDateDDMMYYYYHHmmss()
+   279→    │
+   280→    ├── middleware.ts                       # ✅ withAuth: защита всех маршрутов кроме /login, /api/auth
+   281→    │
+   282→    └── store/
+   283→        ├── useAppStore.ts                  # Основной store (activeTab, theme, sidebar, backend)
+   284→        ├── vsm-store.ts                    # Re-export: useAppStore → useVSMStore
+   285→        ├── app-store.ts                    # Legacy store (старые PanelType + persist)
+   286→        └── task-store.ts                   # Продвинутый менеджер задач (Map-based)
+   287→```
+   288→
+   289→---
+   290→
+   291→## 4. База данных (Prisma/SQLite)
+   292→
+   293→### 4.1. Подключение
+   294→
+   295→- **Провайдер:** SQLite
+   296→- **Файл БД:** `db/custom.db`
+   297→- **Строка подключения:** `DATABASE_URL=file:/home/z/my-project/db/custom.db` (Linux) или `file:C:/My_Project/vsm-code-only/db/custom.db` (Windows)
+   298→- **Режим:** WAL (Write-Ahead Logging) — включён программно в `src/lib/db.ts`
+   299→- **Singleton клиент:** `src/lib/db.ts` — `import { db, withRetry, withRetryTx } from '@/lib/db'`
+   300→
+   301→### 4.2. Модели данных
+   302→
+   303→#### User — Пользователь системы (НОВОЕ)
+   304→
+   305→**Файл:** `prisma/schema.prisma`
+   306→
+   307→| Поле | Тип | Описание |
+   308→|------|-----|----------|
+   309→| `id` | String (@id @default(cuid())) | Уникальный идентификатор |
+   310→| `username` | String (@unique) | Логин (уникальный) |
+   311→| `passwordHash` | String | bcrypt-хеш пароля (salt rounds = 10) |
+   312→| `displayName` | String (default: "") | Отображаемое имя |
+   313→| `role` | String (default: "user") | Роль: `admin` или `user` |
+   314→| `workspace` | String (default: "default") | Рабочее пространство: `default`, `vsm`, `sk` и т.д. |
+   315→| `isActive` | Boolean (default: true) | Активна ли учётная запись |
+   316→| `lastLoginAt` | DateTime? | Время последнего входа |
+   317→| `createdAt` | DateTime | Время создания |
+   318→| `updatedAt` | DateTime | Время обновления |
+   319→
+   320→**Связи:** `excelFiles`, `mainDatabases`, `fileRecords`, `operations`, `ticketCosts`, `ticketExpenses`, `ratingPeriods` (cascade delete)
+   321→
+   322→#### ExcelFile — Реестр загруженных Excel-файлов
+   323→
+   324→| Поле | Тип | Описание |
+   325→|------|-----|----------|
+   326→| `id` | String (@id @default(cuid())) | Уникальный идентификатор |
+   327→| `name` | String | Системное имя файла |
+   328→| `originalName` | String | Оригинальное имя при загрузке |
+   329→| `filePath` | String | Абсолютный путь на диске |
+   330→| `fileSize` | Int | Размер в байтах |
+   331→| `sheetName` | String (default: "Лист1") | Имя листа |
+   332→| `totalRows` | Int (default: 0) | Количество строк |
+   333→| `totalCols` | Int (default: 0) | Количество столбцов |
+   334→| `category` | String (default: "general") | Категория (general, main-database, билеты и т.д.) |
+   335→| `status` | String (default: "uploaded") | Статус: uploaded, processing, processed, error |
+   336→| `isActive` | Boolean (default: false) | Является ли файл активным |
+   337→| `loadedAt` | DateTime | Время загрузки |
+   338→| `createdAt` | DateTime | Время создания записи |
+   339→| `updatedAt` | DateTime | Время последнего обновления |
+   340→| `userId` | String? | ✅ Привязка к пользователю (изоляция) |
+   341→
+   342→#### MainDatabase — Основная база данных сотрудников (метаданные)
+   343→
+   344→| Поле | Тип | Описание |
+   345→|------|-----|----------|
+   346→| `id` | String (@id @default(cuid())) | Уникальный идентификатор |
+   347→| `name` | String | Системное имя файла |
+   348→| `originalName` | String | Оригинальное имя |
+   349→| `filePath` | String | Путь к файлу |
+   350→| `totalRows` | Int (default: 0) | Общее количество строк (113,000+) |
+   351→| `totalCols` | Int (default: 0) | Количество столбцов |
+   352→| `sheetName` | String? | Имя листа |
+   353→| `fileSize` | Int (default: 0) | Размер файла |
+   354→| `keyColumns` | String (default: "[]") | JSON-массив ключевых столбцов |
+   355→| `isActive` | Boolean (default: false) | Активная база |
+   356→| `loadedAt` | DateTime | Время загрузки |
+   357→| `updatedAt` | DateTime | Время обновления |
+   358→| `userId` | String? | ✅ Привязка к пользователю |
+   359→
+   360→#### TicketCost — Записи о затратах на билеты
+   361→
+   362→| Поле | Тип | Описание |
+   363→|------|-----|----------|
+   364→| `id` | String (@id @default(cuid())) | Идентификатор |
+   365→| `name` | String | Имя файла |
+   366→| `originalName` | String | Оригинальное имя |
+   367→| `filePath` | String | Путь |
+   368→| `fileSize` | Int | Размер |
+   369→| `month` | String? | Месяц (определяется из имени файла) |
+   370→| `category` | String (default: "билеты") | Категория: билеты, монтаж, допы, итоговый |
+   371→| `totalAmount` | Float (default: 0) | Общая сумма |
+   372→| `rowCount` | Int (default: 0) | Количество строк |
+   373→| `uploadedAt` | DateTime | Время загрузки |
+   374→| `createdAt` | DateTime | Время создания |
+   375→| `updatedAt` | DateTime | Время обновления |
+   376→| `userId` | String? | ✅ Привязка к пользователю |
+   377→
+   378→#### Macro — Хранилище VBA/Python макросов
+   379→
+   380→| Поле | Тип | Описание |
+   381→|------|-----|----------|
+   382→| `id` | String (@id @default(cuid())) | Идентификатор |
+   383→| `name` | String | Имя макроса |
+   384→| `code` | String | Исходный код |
+   385→| `language` | String (default: "python") | Язык: python, vba |
+   386→| `fileId` | String? | Привязка к файлу |
+   387→| `createdAt` | DateTime | Время создания |
+   388→| `updatedAt` | DateTime | Время обновления |
+   389→
+   390→#### Operation — Аудит-лог операций
+   391→
+   392→| Поле | Тип | Описание |
+   393→|------|-----|----------|
+   394→| `id` | String (@id @default(cuid())) | Идентификатор |
+   395→| `type` | String | Тип операции (upload, load, process, delete и т.д.) |
+   396→| `fileId` | String? | ID связанного файла |
+   397→| `details` | String? | Детали операции (JSON) |
+   398→| `createdAt` | DateTime | Время операции |
+   399→| `userId` | String? | ✅ Кто выполнил операцию |
+   400→
+   401→#### TicketExpense — Записи о затратах на билеты (альтернативная модель)
+   402→
+   403→| Поле | Тип | Описание |
+   404→|------|-----|----------|
+   405→| `id` | String (@id @default(cuid())) | Идентификатор |
+   406→| `fileName` | String | Имя файла |
+   407→| `originalName` | String | Оригинальное имя |
+   408→| `filePath` | String | Путь |
+   409→| `fileSize` | Int | Размер |
+   410→| `isActive` | Boolean (default: false) | Активен |
+   411→| `loadedAt` | DateTime | Время загрузки |
+   412→| `createdAt` | DateTime | Время создания |
+   413→| `updatedAt` | DateTime | Время обновления |
+   414→| `userId` | String? | ✅ Привязка к пользователю |
+   415→
+   416→#### FileRecord — Реестр файлов (НОВОЕ)
+   417→
+   418→| Поле | Тип | Описание |
+   419→|------|-----|----------|
+   420→| `id` | String (@id @default(cuid())) | Идентификатор |
+   421→| `fileName` | String | Имя файла |
+   422→| `originalName` | String | Оригинальное имя |
+   423→| `filePath` | String | Путь |
+   424→| `fileSize` | Int (default: 0) | Размер |
+   425→| `mimeType` | String (default: "") | MIME-тип |
+   426→| `fileType` | String (default: "other") | Тип: main-db, reference, calendar, ticket, other |
+   427→| `status` | String (default: "uploaded") | Статус: uploaded, processing, active, error |
+   428→| `uploadedAt` | DateTime | Время загрузки |
+   429→| `updatedAt` | DateTime | Время обновления |
+   430→| `metadata` | String? | JSON-строка с доп. данными |
+   431→| `userId` | String? | ✅ Привязка к пользователю |
+   432→
+   433→#### RatingPeriod — Реестр оценок по полугодиям (НОВОЕ)
+   434→
+   435→| Поле | Тип | Описание |
+   436→|------|-----|----------|
+   437→| `id` | String (@id @default(cuid())) | Идентификатор |
+   438→| `year` | Int | Год (2024, 2025, 2026...) |
+   439→| `half` | Int | Полугодие: 1 или 2 |
+   440→| `label` | String | Метка: "2024 Реестр за 1 полугодие" |
+   441→| `fileName` | String | Имя файла |
+   442→| `originalName` | String | Оригинальное имя |
+   443→| `filePath` | String | Путь |
+   444→| `fileSize` | Int (default: 0) | Размер |
+   445→| `totalRows` | Int (default: 0) | Количество строк |
+   446→| `status` | String (default: "uploaded") | Статус |
+   447→| `uploadedAt` | DateTime | Время загрузки |
+   448→| `updatedAt` | DateTime | Время обновления |
+   449→| `userId` | String? | ✅ Привязка к пользователю |
+   450→
+   451→**Уникальный индекс:** `@@unique([year, half])` — один файл на полугодие
+   452→
+   453→#### DailyTrackingRecord — Ежедневный учёт персонала (НОВОЕ)
+   454→
+   455→| Поле | Тип | Описание |
+   456→|------|-----|----------|
+   457→| `id` | String (@id @default(cuid())) | Идентификатор |
+   458→| `fileRecordId` | String | Ссылка на FileRecord |
+   459→| `userId` | String? | Привязка к пользователю |
+   460→| `employeeFio` | String | ФИО сотрудника |
+   461→| `employeeTn` | String? | Табельный номер |
+   462→| `site` | String | Площадка (ВСП, СК, Геленджик) |
+   463→| `status` | String | "на объекте" / "в командировке" / "в отпуске" / "уволен" |
+   464→| `eventDate` | DateTime | Дата события |
+   465→| `department` | String? | Подразделение |
+   466→| `position` | String? | Должность |
+   467→| `comment` | String? | Комментарий |
+   468→| `sourceFile` | String | Имя исходного файла |
+   469→| `sourceRow` | Int | Строка в исходнике |
+   470→
+   471→**Индексы:** `[eventDate, site]`, `[userId, eventDate]`, `[employeeTn]`, `[site, eventDate]`
+   472→
+   473→#### FlightEvent — Рейсы Календаря Прилёт-Вылет (НОВОЕ)
+   474→
+   475→| Поле | Тип | Описание |
+   476→|------|-----|----------|
+   477→| `id` | String (@id @default(cuid())) | Идентификатор |
+   478→| `fileRecordId` | String | Ссылка на FileRecord |
+   479→| `userId` | String? | Привязка к пользователю |
+   480→| `employeeFio` | String | ФИО сотрудника |
+   481→| `employeeTn` | String? | Табельный номер |
+   482→| `passport` | String? | Номер паспорта |
+   483→| `flightType` | String | "arrival" / "departure" |
+   484→| `flightDate` | DateTime | Дата рейса |
+   485→| `route` | String? | Маршрут |
+   486→| `flightNumber` | String? | Номер рейса |
+   487→| `carrier` | String? | Перевозчик |
+   488→| `ticketPrice` | Float (default: 0) | Стоимость билета |
+   489→| `sheetName` | String | Из какого листа (1-30) |
+   490→| `sourceRow` | Int | Строка в исходнике |
+   491→
+   492→**Индексы:** `[flightDate, flightType]`, `[userId, flightDate]`, `[employeeTn]`, `[fileRecordId]`
+   493→
+   494→#### TicketRecord — Обработанные записи билетов (НОВОЕ)
+   495→
+   496→| Поле | Тип | Описание |
+   497→|------|-----|----------|
+   498→| `id` | String (@id @default(cuid())) | Идентификатор |
+   499→| `fileRecordId` | String | Ссылка на FileRecord |
+   500→| `userId` | String? | Привязка к пользователю |
+   501→| `org` | String | "vsm" / "sk" |
+   502→| `employeeFio` | String? | ФИО |
+   503→| `employeeFioEn` | String? | ФИО на английском |
+   504→| `employeeTn` | String? | Табельный номер |
+   505→| `passport` | String? | Номер паспорта |
+   506→| `tabNumber1C` | String? | Табельный номер 1С |
+   507→| `fio1C` | String? | ФИО 1С |
+   508→| `site` | String? | Площадка |
+   509→| `route` | String? | Маршрут |
+   510→| `flightDate` | DateTime? | Дата рейса |
+   511→| `ticketPrice` | Float (default: 0) | Стоимость |
+   512→| `ticketType` | String? | Тип билета |
+   513→| `ticketNumber` | String? | Номер билета |
+   514→| `sourceFile` | String | Исходный файл |
+   515→| `sourceRow` | Int | Строка в исходнике |
+   516→
+   517→**Индексы:** `[org, flightDate]`, `[userId, org]`, `[employeeTn]`, `[fileRecordId]`
+   518→
+   519→#### RatingRecord — Оценки KPI сотрудников (НОВОЕ)
+   520→
+   521→| Поле | Тип | Описание |
+   522→|------|-----|----------|
+   523→| `id` | String (@id @default(cuid())) | Идентификатор |
+   524→| `ratingPeriodId` | String? | Ссылка на RatingPeriod |
+   525→| `userId` | String? | Привязка к пользователю |
+   526→| `employeeFio` | String | ФИО |
+   527→| `employeeTn` | String? | Табельный номер |
+   528→| `department` | String? | Подразделение |
+   529→| `position` | String? | Должность |
+   530→| `score` | Float (default: 0) | Оценка (1-5) |
+   531→| `period` | String? | Период оценки |
+   532→| `sourceFile` | String | Исходный файл |
+   533→| `sourceRow` | Int | Строка в исходнике |
+   534→
+   535→**Индексы:** `[ratingPeriodId]`, `[userId]`, `[employeeTn]`, `[department]`
+   536→
+   537→### 4.3. Важное замечание о хранении данных
+   538→
+   539→**113,000+ записей сотрудников НЕ хранятся в SQLite.** Они хранятся в **in-memory кеше** через `globalThis`. SQLite используется для:
+   540→- Метаданных файлов (имя, путь, размер, статус)
+   541→- Пользователей и их хешей паролей
+   542→- Аудит-лога операций
+   543→- Реестра файлов по типам
+   544→- **Доменных данных:** DailyTrackingRecord, FlightEvent, TicketRecord, RatingRecord
+   545→- **Архивов:** archive-YYYY-MM.db (месячные архивы доменных данных)
+   546→
+   547→---
+   548→
+   549→## 5. Аутентификация и многопользовательский режим
+   550→
+   551→### 5.1. NextAuth.js — Credentials Provider
+   552→
+   553→**Файл:** `src/app/api/auth/[...nextauth]/route.ts`
+   554→
+   555→Система аутентификации построена на **NextAuth.js v4** с провайдером **Credentials** (логин/пароль).
+   556→
+   557→**Конфигурация:**
+   558→
+   559→```typescript
+   560→export const authOptions: NextAuthOptions = {
+   561→  providers: [
+   562→    CredentialsProvider({
+   563→      credentials: { username, password },
+   564→      async authorize(credentials) {
+   565→        // 1. Поиск пользователя в БД (с retry для WAL)
+   566→        const user = await withRetry(() =>
+   567→          db.user.findUnique({ where: { username: credentials.username } })
+   568→        )
+   569→        // 2. Проверка пароля через bcrypt
+   570→        const isValid = await bcrypt.compare(credentials.password, user.passwordHash)
+   571→        // 3. Обновление lastLoginAt
+   572→        // 4. Возврат { id, name, role, workspace }
+   573→      },
+   574→    }),
+   575→  ],
+   576→  session: { strategy: 'jwt', maxAge: 8 * 60 * 60 }, // 8 часов
+   577→  pages: { signIn: '/login' },
+   578→  secret: process.env.NEXTAUTH_SECRET,
+   579→}
+   580→```
+   581→
+   582→**Поток аутентификации:**
+   583→
+   584→```
+   585→Пользователь → /login (страница входа)
+   586→  ↓ ввод логина/пароля
+   587→  ↓ signIn('credentials', { redirect: false })
+   588→  ↓ POST /api/auth/callback/credentials
+   589→  ↓ authorize() → bcrypt.compare() → JWT token
+   590→  ↓ Cookie: next-auth.session-token
+   591→  ↓ Redirect → / (защищённая страница)
+   592→```
+   593→
+   594→### 5.2. Middleware — защита маршрутов
+   595→
+   596→**Файл:** `src/middleware.ts`
+   597→
+   598→```typescript
+   599→export default withAuth(
+   600→  function middleware() { return NextResponse.next() },
+   601→  { pages: { signIn: '/login' } }
+   602→)
+   603→
+   604→export const config = {
+   605→  matcher: ['/((?!api/auth|login|_next/static|_next/image|favicon.ico).*)'],
+   606→}
+   607→```
+   608→
+   609→**Защищены:** все маршруты, кроме:
+   610→- `/api/auth/*` — endpoints NextAuth
+   611→- `/login` — страница входа
+   612→- `/_next/static`, `/_next/image` — статика
+   613→- `/favicon.ico`
+   614→
+   615→### 5.3. Страница входа
+   616→
+   617→**Файл:** `src/app/login/page.tsx`
+   618→
+   619→- Зелёная корпоративная тема (Shield иконка)
+   620→- Поля: логин, пароль
+   621→- Обработка ошибок: «Неверный логин или пароль», «Ошибка подключения»
+   622→- Loading state с спиннером
+   623→- После успеха — редирект на `/`
+   624→
+   625→### 5.4. SessionProvider
+   626→
+   627→**Файл:** `src/components/auth-provider.tsx`
+   628→
+   629→Оборачивает всё приложение в `SessionProvider` из `next-auth/react`. Подключён в `layout.tsx`:
+   630→
+   631→```tsx
+   632→<ThemeProvider>
+   633→  <AuthProvider>
+   634→    <ThemeInitializer />
+   635→    {children}
+   636→    <Toaster />
+   637→  </AuthProvider>
+   638→</ThemeProvider>
+   639→```
+   640→
+   641→### 5.5. getCurrentUser() — server-side helper
+   642→
+   643→**Файл:** `src/lib/auth.ts`
+   644→
+   645→```typescript
+   646→export async function getCurrentUser() {
+   647→  const session = await getServerSession(authOptions)
+   648→  return session?.user as {
+   649→    id: string
+   650→    name: string
+   651→    email: string
+   652→    role: string      // "admin" | "user"
+   653→    workspace: string // "default" | "vsm" | "sk" | ...
+   654→  } | null
+   655→}
+   656→```
+   657→
+   658→Используется в server components и API routes для получения текущего пользователя.
+   659→
+   660→### 5.6. Seed — стартовые пользователи
+   661→
+   662→**Файл:** `prisma/seed.ts`
+   663→**Команда:** `bun run db:seed`
+   664→
+   665→Создаёт 3 пользователей:
+   666→
+   667→| Логин | Пароль | Роль | Workspace | DisplayName |
+   668→|-------|--------|------|-----------|-------------|
+   669→| `admin` | `admin123` | admin | default | Администратор |
+   670→| `user1` | `user123` | user | vsm | Пользователь 1 |
+   671→| `user2` | `user123` | user | sk | Пользователь 2 |
+   672→
+   673→Пароли хешируются через `bcrypt.hash(password, 10)`.
+   674→
+   675→### 5.7. Изоляция рабочих пространств
+   676→
+   677→Каждая модель данных имеет поле `userId` (опциональное для обратной совместимости). При создании записи:
+   678→
+   679→```typescript
+   680→const user = await getCurrentUser()
+   681→const file = await withRetry(() =>
+   682→  db.excelFile.create({
+   683→    data: { ...fileData, userId: user?.id }
+   684→  })
+   685→)
+   686→```
+   687→
+   688→При чтении — фильтрация по `userId`:
+   689→
+   690→```typescript
+   691→const files = await withRetry(() =>
+   692→  db.excelFile.findMany({ where: { userId: user?.id } })
+   693→)
+   694→```
+   695→
+   696→Поле `workspace` на User позволяет группировать пользователей по организациям (ВСП, СК, Геленджик и т.д.).
+   697→
+   698→---
+   699→
+   700→## 6. SQLite WAL: настройка для 20 пользователей
+   701→
+   702→### 6.1. Проблема
+   703→
+   704→SQLite по умолчанию использует режим `DELETE` journal, при котором:
+   705→- Писатель блокирует всю БД для других писателей и читателей
+   706→- При 20 одновременных пользователях возникают ошибки `SQLITE_BUSY`
+   707→- Высокая вероятность «database is locked»
+   708→
+   709→### 6.2. Решение
+   710→
+   711→**Файл:** `src/lib/db.ts`
+   712→
+   713→Включены следующие PRAGMA при инициализации:
+   714→
+   715→```typescript
+   716→const SQLITE_PRAGMAS = [
+   717→  `PRAGMA journal_mode=WAL`,        // Readers не блокируют writers (и наоборот)
+   718→  `PRAGMA busy_timeout=10000`,      // Ждать до 10с вместо немедленной ошибки SQLITE_BUSY
+   719→  `PRAGMA synchronous=NORMAL`,      // Безопасно в WAL, быстрее чем FULL
+   720→  `PRAGMA cache_size=-20000`,       // 20MB кеш страниц (по умолчанию 2MB)
+   721→  `PRAGMA temp_store=MEMORY`,       // Временные таблицы и индексы в RAM
+   722→  `PRAGMA mmap_size=268435456`,     // Memory-mapped I/O до 256MB
+   723→  `PRAGMA foreign_keys=ON`,         // Включить внешние ключи
+   724→]
+   725→```
+   726→
+   727→**Инициализация** запускается один раз при первом обращении:
+   728→
+   729→```typescript
+   730→let prismaInitialized = false
+   731→
+   732→async function initSqlite() {
+   733→  if (prismaInitialized) return
+   734→  prismaInitialized = true
+   735→  for (const pragma of SQLITE_PRAGMAS) {
+   736→    try {
+   737→      await db.$executeRawUnsafe(pragma)
+   738→    } catch {
+   739→      // Игнорируем — возможно, не SQLite
+   740→    }
+   741→  }
+   742→}
+   743→
+   744→// Fire and forget
+   745→initSqlite().catch(() => {})
+   746→```
+   747→
+   748→### 6.3. withRetry() — retry wrapper для операций
+   749→
+   750→Даже с `busy_timeout` SQLite может периодически выбрасывать «database is locked» при высокой нагрузке. `withRetry()` реализует retry с экспоненциальной задержкой:
+   751→
+   752→```typescript
+   753→export async function withRetry<T>(
+   754→  fn: () => Promise<T>,
+   755→  options: {
+   756→    retries?: number       // default: 5
+   757→    baseDelayMs?: number   // default: 50
+   758→    maxDelayMs?: number    // default: 2000
+   759→  } = {},
+   760→): Promise<T> {
+   761→  for (let attempt = 0; attempt <= retries; attempt++) {
+   762→    try {
+   763→      return await fn()
+   764→    } catch (error) {
+   765→      const isLockError = msg.includes('locked') || msg.includes('busy')
+   766→      if (!isLockError || attempt === retries) throw error
+   767→
+   768→      // Экспоненциальная задержка с джиттером
+   769→      const delay = Math.min(
+   770→        maxDelayMs,
+   771→        baseDelayMs * Math.pow(2, attempt) + Math.random() * 50
+   772→      )
+   773→      await new Promise(r => setTimeout(r, delay))
+   774→    }
+   775→  }
+   776→}
+   777→```
+   778→
+   779→**Паттерны retry-ошибок:**
+   780→- `locked`
+   781→- `busy`
+   782→- `sqlite_busy`
+   783→- `database is locked`
+   784→- `could not obtain lock`
+   785→- `transaction conflicts`
+   786→
+   787→**Задержки (с базой 50ms):**
+   788→| Попытка | Задержка |
+   789→|---------|----------|
+   790→| 1 | ~50ms + джиттер |
+   791→| 2 | ~100ms + джиттер |
+   792→| 3 | ~200ms + джиттер |
+   793→| 4 | ~400ms + джиттер |
+   794→| 5 | ~800ms + джиттер |
+   795→
+   796→### 6.4. withRetryTx() — retry для транзакций
+   797→
+   798→```typescript
+   799→export async function withRetryTx<T>(
+   800→  fn: (tx) => Promise<T>,
+   801→  options?: { retries?: number; baseDelayMs?: number; maxDelayMs?: number },
+   802→): Promise<T> {
+   803→  return withRetry(() => db.$transaction(fn), options)
+   804→}
+   805→```
+   806→
+   807→### 6.5. Рекомендации по использованию
+   808→
+   809→**Всегда оборачивайте БД-операции в `withRetry`:**
+   810→
+   811→```typescript
+   812→// ❌ Плохо — может упасть при 20 пользователях
+   813→const user = await db.user.findUnique({ where: { id } })
+   814→
+   815→// ✅ Хорошо — retry при блокировке
+   816→const user = await withRetry(() => db.user.findUnique({ where: { id } }))
+   817→```
+   818→
+   819→**Для транзакций:**
+   820→
+   821→```typescript
+   822→const result = await withRetryTx(async (tx) => {
+   823→  const user = await tx.user.create({ data: { ... } })
+   824→  await tx.fileRecord.create({ data: { userId: user.id, ... } })
+   825→  return user
+   826→})
+   827→```
+   828→
+   829→### 6.6. Сравнение режимов SQLite
+   830→
+   831→| Режим | Писателей | Читателей | Изоляция | Стоимость | Подходит для |
+   832→|-------|-----------|-----------|----------|-----------|-------------|
+   833→| DELETE (default) | 1 (блокирует всё) | 0 во время записи | Полная | 0₽ | 1-3 пользователя |
+   834→| **WAL (наш выбор)** | **1, но не блокирует чтение** | **Много** | **Snapshot** | **0₽** | **До 20 пользователей** |
+   835→| PostgreSQL | Много | Много | MVCC | Платно/RU-доступ | 50+ пользователей |
+   836→
+   837→### 6.7. Файлы WAL
+   838→
+   839→При включении WAL создаются два дополнительных файла рядом с `custom.db`:
+   840→
+   841→| Файл | Назначение |
+   842→|------|-----------|
+   843→| `db/custom.db` | Основная база данных |
+   844→| `db/custom.db-wal` | Write-Ahead Log (журнал операций) |
+   845→| `db/custom.db-shm` | Shared memory index для WAL |
+   846→
+   847→**Важно:** Не удаляйте `.wal` и `.shm` файлы во время работы приложения. При корректном закрытии SQLite автоматически выполняет checkpoint и переносит данные из WAL в основной файл.
+   848→
+   849→---
+   850→
+   851→## 7. Worker Thread Pool
+   852→
+   853→**Файл:** `src/lib/worker-pool.ts`
+   854→**Worker script:** `src/lib/workers/excel-parser.worker.ts`
+   855→
+   856→### 7.1. Проблема
+   857→
+   858→При 150+ файлов/день и файлах с 30 листами парсинг Excel в основном потоке блокирует event loop → 502 Bad Gateway для всех пользователей.
+   859→
+   860→### 7.2. Решение: WorkerPool
+   861→
+   862→Пул из N worker-потоков (по умолчанию = min(CPU cores, 4)), которые парсят Excel в фоновых потоках:
+   863→
+   864→```
+   865→API Route → workerPool.execute(task) → Worker Thread (парсинг XLSX)
+   866→         ← Promise<WorkerResult>     ← Progress → UI (onProgress callback)
+   867→```
+   868→
+   869→### 7.3. Поддерживаемые типы задач
+   870→
+   871→| Type | Описание | Прогресс |
+   872→|------|----------|----------|
+   873→| `parse-excel` | Универсальный парсинг (все листы) | По листам |
+   874→| `parse-daily` | Ежедневный учёт (1 лист) | По завершении |
+   875→| `parse-calendar` | Календарь (до 30 листов) | По листам |
+   876→| `parse-tickets` | Билеты ВСП/СК | По завершении |
+   877→
+   878→### 7.4. API WorkerPool
+   879→
+   880→```typescript
+   881→import { workerPool, type WorkerTask } from '@/lib/worker-pool'
+   882→
+   883→const result = await workerPool.execute({
+   884→  id: 'task-1',
+   885→  type: 'parse-calendar',
+   886→  payload: { filePath: '/data/calendar.xlsx' },
+   887→  onProgress: (percent, message) => {
+   888→    console.log(`${percent}%: ${message}`) // "50%: Лист 15/30: Июль"
+   889→  },
+   890→  signal: abortController.signal, // Опциональная отмена
+   891→})
+   892→// result: { taskId, success, data, error?, duration }
+   893→```
+   894→
+   895→### 7.5. Ключевые возможности
+   896→
+   897→- **FIFO очередь** — задачи ждут свободного worker'а
+   898→- **Progress reporting** — callback `onProgress` из worker'а (критично для 30-листовых файлов)
+   899→- **AbortSignal** — отмена задачи до или во время выполнения
+   900→- **Auto-restart** — упавший worker автоматически перезапускается
+   901→- **HMR-safe singleton** — пул переживает hot reload (как `db.ts`)
+   902→- **TaskId correlation** — каждое сообщение от worker'а содержит `taskId`
+   903→
+   904→### 7.6. Мониторинг
+   905→
+   906→```typescript
+   907→const { total, busy, queued } = workerPool.status
+   908→// { total: 4, busy: 2, queued: 5 }
+   909→```
+   910→
+   911→---
+   912→
+   913→## 8. DuckDB: аналитические запросы
+   914→
+   915→**Файл:** `src/lib/duckdb.ts`
+   916→**API route:** `src/app/api/analytics/route.ts`
+   917→
+   918→### 8.1. Проблема
+   919→
+   920→SQLite оптимизирован для OLTP (точечные чтения/записи). Аналитические запросы (агрегация по миллионам строк, GROUP BY, UNION ALL) выполняются медленно.
+   921→
+   922→### 8.2. Решение: DuckDB
+   923→
+   924→DuckDB — in-process OLAP база данных, запускается без сервера, читает SQLite напрямую через `sqlite_scan()`.
+   925→
+   926→```typescript
+   927→import { duckQuery } from '@/lib/duckdb'
+   928→
+   929→// Аналитика по всем рейсам за год (DuckDB в 100× быстрее SQLite)
+   930→const result = await duckQuery(`
+   931→  SELECT site, COUNT(*) as cnt, AVG(ticketPrice) as avg_price
+   932→  FROM sqlite_scan('/path/to/custom.db', 'FlightEvent')
+   933→  WHERE flightDate >= '2025-01-01' AND flightDate < '2026-01-01'
+   934→  GROUP BY site
+   935→  ORDER BY cnt DESC
+   936→`)
+   937→```
+   938→
+   939→### 8.3. Ключевые функции
+   940→
+   941→| Функция | Описание |
+   942→|---------|----------|
+   943→| `duckQuery(sql, params?)` | Выполнить SQL, вернуть массив строк |
+   944→| `duckQueryOne(sql, params?)` | Выполнить SQL, вернуть одну строку |
+   945→| `buildCrossPeriodQuery(table, opts)` | Построить UNION ALL по основной + архивным БД |
+   946→| `listArchives()` | Список доступных архивов (YYYY-MM) |
+   947→| `getMainDbPath()` | Путь к основной БД |
+   948→| `getArchiveDbPath(ym)` | Путь к архиву |
+   949→| `archiveExists(ym)` | Проверить существование архива |
+   950→| `closeDuckDB()` | Закрыть соединение (graceful shutdown) |
+   951→
+   952→### 8.4. Cross-period запросы
+   953→
+   954→```typescript
+   955→// Запрос по текущей БД + всем архивам за указанный период
+   956→const sql = buildCrossPeriodQuery('FlightEvent', {
+   957→  dateColumn: 'flightDate',
+   958→  startDate: '2024-06-01',
+   959→  endDate: '2025-06-30',
+   960→  select: 'site, COUNT(*) as total_flights',
+   961→  groupBy: 'site',
+   962→})
+   963→const result = await duckQuery(sql)
+   964→```
+   965→
+   966→### 8.5. API: `/api/analytics`
+   967→
+   968→| Метод | Параметры | Описание |
+   969→|-------|-----------|----------|
+   970→| `POST` | `{ query: "SELECT ..." }` | Raw SQL (только SELECT) |
+   971→| `POST` | `{ table, dateColumn, startDate, endDate, ... }` | Builder mode |
+   972→| `GET` | — | Список архивов + путь к основной БД |
+   973→
+   974→**Безопасность:** Разрешены только `SELECT` и `WITH` запросы. INSERT/UPDATE/DELETE → 403.
+   975→
+   976→---
+   977→
+   978→## 9. Архивация: месячные архивы
+   979→
+   980→**Файл:** `src/lib/archive.ts`
+   981→**Script:** `scripts/archive.js` (standalone, better-sqlite3)
+   982→**API route:** `src/app/api/archive/route.ts`
+   983→
+   984→### 9.1. Проблема
+   985→
+   986→При 150 файлов/день основная БД вырастет до миллионов строк за год → замедление запросов, раздувание файла, долгий VACUUM.
+   987→
+   988→### 9.2. Решение: месячные архивы
+   989→
+   990→Каждый 1-й день месяца данные за прошлый месяц переносятся в `archive-YYYY-MM.db`:
+   991→
+   992→```
+   993→custom.db (текущие данные ~800K строк)
+   994→├── archive-2025-01.db (read-only)
+   995→├── archive-2025-02.db (read-only)
+   996→├── archive-2025-03.db (read-only)
+   997→└── ...
+   998→```
+   999→
+  1000→### 9.3. Архивируемые таблицы
+  1001→
+  1002→| Таблица | Столбец даты | Объём/мес |
+  1003→|---------|-------------|-----------|
+  1004→| `DailyTrackingRecord` | `eventDate` | ~13K-52K строк (26 файлов) |
+  1005→| `FlightEvent` | `flightDate` | ~10K-40K строк |
+  1006→| `TicketRecord` | `flightDate` | ~5K-20K строк |
+  1007→| `RatingRecord` | `createdAt` | ~1K-5K строк |
+  1008→
+  1009→### 9.4. Процесс архивации
+  1010→
+  1011→1. Создаётся `archive-YYYY-MM.db` с аналогичной схемой
+  1012→2. Данные за указанный месяц COPY в архив (transaction)
+  1013→3. Удаление скопированных данных из основной БД
+  1014→4. `VACUUM` обеих БД для сжатия
+  1015→5. Создание индексов в архиве
+  1016→6. Если ошибка — partial archive удаляется (atomic)
+  1017→
+  1018→### 9.5. API: `/api/archive`
+  1019→
+  1020→| Метод | Параметры | Описание |
+  1021→|-------|-----------|----------|
+  1022→| `POST` | `{ yearMonth: "2025-01" }` | Архивировать конкретный месяц |
+  1023→| `POST` | `{ auto: true }` | Авто-архивация прошлого месяца (для cron) |
+  1024→| `GET` | — | Список архивов + размер |
+  1025→| `GET` | `?yearMonth=2025-01&table=FlightEvent` | Превью записей из архива |
+  1026→
+  1027→### 9.6. Автоматическая архивация (Cron)
+  1028→
+  1029→**Расписание:** 1-е число каждого месяца в 02:00 (Europe/Moscow)
+  1030→
+  1031→Cron-задача вызывает `POST /api/archive {"auto":true}`.
+  1032→
+  1033→### 9.7. Запросы к архивам
+  1034→
+  1035→Архивы — read-only SQLite файлы. Запрашиваются через:
+  1036→1. **DuckDB `sqlite_scan()`** — для аналитических запросов
+  1037→2. **`queryArchive(yearMonth, sql)`** — для точечных запросов через better-sqlite3
+  1038→3. **`buildCrossPeriodQuery()`** — автоматический UNION ALL по текущей + архивным БД
+  1039→
+  1040→### 9.8. Прогноз по объёмам
+  1041→
+  1042→| Период | Строк в current DB | Архивов | Производительность |
+  1043→|--------|-------------------|---------|-------------------|
+  1044→| Месяц 1 | ~800K | 0 | ✅ Мгновенно |
+  1045→| Месяц 6 | ~800K | 5 | ✅ Мгновенно |
+  1046→| Год 1 | ~800K | 11 | ✅ + DuckDB для аналитики |
+  1047→| Год 3 | ~800K | 35 | ✅ Текущая БД та же |
+  1048→
+  1049→---
+  1050→
+  1051→## 10. Состояние приложения (Zustand Stores)
+  1052→
+  1053→### 10.1. useAppStore (основной store)
+  1054→
+  1055→**Файл:** `src/store/useAppStore.ts`
+  1056→**Реэкспорт:** `src/store/vsm-store.ts` → `useVSMStore`
+  1057→
+  1058→```typescript
+  1059→interface AppState {
+  1060→  // Активная вкладка (19 вариантов)
+  1061→  activeTab: TabId
+  1062→  setActiveTab: (tab: TabId) => void
+  1063→
+  1064→  // Legacy: активная панель (для обратной совместимости)
+  1065→  activePanel: PanelType
+  1066→  setActivePanel: (panel: PanelType) => void
+  1067→
+  1068→  // Тема оформления: 'color' (amber/оранжевая) | 'light' | 'dark'
+  1069→  themeMode: ThemeMode
+  1070→  setThemeMode: (mode: ThemeMode) => void
+  1071→
+  1072→  // Подвкладка настроек: 'main-base' | 'references' | 'modules' | 'auth'
+  1073→  settingsSubTab: SettingsSubTab
+  1074→  setSettingsSubTab: (tab: SettingsSubTab) => void
+  1075→
+  1076→  // Состояние боковой панели
+  1077→  sidebarCollapsed: boolean
+  1078→  setSidebarCollapsed: (collapsed: boolean) => void
+  1079→
+  1080→  // Статус бэкенда: 'online' | 'offline' | 'checking'
+  1081→  backendStatus: 'online' | 'offline' | 'checking'
+  1082→  setBackendStatus: (status: ...) => void
+  1083→
+  1084→  // Флаг онлайн-статуса бэкенда
+  1085→  backendOnline: boolean
+  1086→  setBackendOnline: (online: boolean) => void
+  1087→
+  1088→  // Глобальный флаг загрузки
+  1089→  isLoading: boolean
+  1090→  setIsLoading: (loading: boolean) => void
+  1091→}
+  1092→```
+  1093→
+  1094→#### TabId — 19 типов вкладок
+  1095→
+  1096→| TabId | Название | Группа | Работает |
+  1097→|-------|----------|--------|----------|
+  1098→| `dashboard` | Главная | main | ✅ |
+  1099→| `main-db` | Основная База | data | ✅ |
+  1100→| `experience` | Стаж | data | ❌ |
+  1101→| `daily-tracking` | Ежедневный учёт | data | ✅ |
+  1102→| `calendar` | Календарь П-В | data | ✅ |
+  1103→| `carnet` | Карнет | data | ❌ |
+  1104→| `tickets` | Затраты на билеты | data | ✅ |
+  1105→| `employee-path` | Путь сотрудника | data | ❌ |
+  1106→| `dismissed-report` | Уволенный персонал | reports | ❌ |
+  1107→| `employment-costs` | Затраты на труд. | reports | ❌ |
+  1108→| `mobilization-plan` | Мобилизация ОП | reports | ❌ |
+  1109→| `ratings` | Оценки | reports | ✅ |
+  1110→| `utilities` | Утилиты | system | ✅ |
+  1111→| `vba-lab` | VBA Лаборатория | system | ❌ |
+  1112→| `file-prepare` | Подготовка файлов | system | ❌ |
+  1113→| `settings` | Настройки | system | ✅ |
+  1114→| `integration` | Интеграция | system | ❌ |
+  1115→| `data-merge` | Слияние данных | system | ❌ |
+  1116→| `file-manager` | Файловый менеджер | system | ✅ |
+  1117→
+  1118→### 10.2. useTaskStore (менеджер задач)
+  1119→
+  1120→**Файл:** `src/store/task-store.ts`
+  1121→
+  1122→Продвинутый менеджер задач с Map-хранилищем. Поддерживает:
+  1123→
+  1124→- **Типы задач:** upload, download, processing, export, load, validate, other
+  1125→- **Под-шаги:** Каждая задача может иметь массив `TaskStep[]` с отдельными статусами
+  1126→- **AbortController:** Каждая задача имеет сигнал отмены для fetch-запросов
+  1127→- **Auto-dismiss:** Завершённые задачи автоматически удаляются через 5000мс
+  1128→- **Автоочистка:** Каждые 30 секунд удаляются завершённые задачи
+  1129→
+  1130→```typescript
+  1131→interface TaskInfo {
+  1132→  id: string                    // "task-{timestamp}-{counter}"
+  1133→  name: string                  // Читаемое имя задачи
+  1134→  type: TaskInfo['type']        // Тип для группировки
+  1135→  sourceTab: string             // Вкладка-источник
+  1136→  status: TaskStatus            // pending | running | done | error | cancelled
+  1137→  progress: number              // 0-100, -1 = неопределённый
+  1138→  message: string               // Детальный статус
+  1139→  steps: TaskStep[]             // Под-шаги
+  1140→  fileName?: string             // Имя файла (если применимо)
+  1141→  startedAt: number             // Timestamp начала
+  1142→  finishedAt?: number           // Timestamp завершения
+  1143→  abortController?: AbortController  // Для отмены
+  1144→  autoDismissMs: number         // Автоудаление через N мс (default: 5000)
+  1145→  error?: string                // Сообщение об ошибке
+  1146→}
+  1147→```
+  1148→
+  1149→**Важно:** Проверки статуса (`fetchStatus`) выполняются **молча** — без создания задач в `useTaskStore`, чтобы избежать бесконечных циклов «Запрос статуса...».
+  1150→
+  1151→---
+  1152→
+  1153→## 11. Вкладки и панели — подробное описание
+  1154→
+  1155→### 11.1. ✅ Рабочие панели
+  1156→
+  1157→---
+  1158→
+  1159→#### 📊 Главная (Dashboard)
+  1160→
+  1161→**TabId:** `dashboard`
+  1162→**Компонент:** Интегрирован в `page.tsx`
+  1163→**Группа:** Главная
+  1164→
+  1165→**Содержимое:**
+  1166→- **Приветствие** — Адаптивное (Доброе утро / Добрый день / Добрый вечер / Доброй ночи)
+  1167→- **Живые часы** — Обновляются каждую секунду, показывают дату и время
+  1168→- **Бегущая строка (Ticker)** — 8 новостей системы с иконками и автопрокруткой
+  1169→- **4 карточки статистики** с ProgressRing:
+  1170→  - Сотрудников (из БД или «—» если не загружена)
+  1171→  - Онлайн (время работы)
+  1172→  - БД Статус (загружена / не загружена)
+  1173→  - Бэкенд (онлайн / офлайн / проверка)
+  1174→- **Хронология последней активности** — 6 событий с иконками и временем
+  1175→- **Сетка модулей** — 18 карточек (цветные иконки, WIP-бейджи, зелёные точки для рабочих)
+  1176→- **Таблица распределения по подразделениям** — 6 строк
+  1177→- **Таблица ежемесячных затрат на билеты** — 6 месяцев (ВСП + СК)
+  1178→- **Монитор системного здоровья** — CPU, Память, Диск (симуляция каждые 5 сек)
+  1179→
+  1180→**Автоматические проверки:**
+  1181→- Backend health: каждые 30 сек (`/api/health`) — **молча**
+  1182→- DB status: каждые 60 сек (`/api/main-db/status`) — **молча**
+  1183→- System health: каждые 5 сек (симуляция)
+  1184→
+  1185→---
+  1186→
+  1187→#### 🗄️ Основная База (MainDatabasePanel)
+  1188→
+  1189→**TabId:** `main-db`
+  1190→**Компонент:** `src/components/panels/MainDatabasePanel.tsx`
+  1191→**Группа:** Данные
+  1192→**API:** `/api/main-db/*`, `/api/reports/*`
+  1193→
+  1194→**Два режима работы:**
+  1195→
+  1196→1. **Режим «Данные»:**
+  1197→   - Пагинированная таблица (50 строк на страницу)
+  1198→   - Полнотекстовый поиск по всем столбцам
+  1199→   - Фильтры по столбцам (Excel-подобные multi-select)
+  1200→   - Сортировка по любому столбцу (asc/desc)
+  1201→   - Переключатель «Только ключевые столбцы» (13 столбцов с индексами [0,1,2,3,4,5,6,8,10,11,12,13])
+  1202→   - Авто-загрузка при наличии файла в `/upload/main-database/`
+  1203→
+  1204→2. **Режим «Отчёты»:**
+  1205→   - Отчёт по трудоустройству (фильтры: год, гражданство, территория)
+  1206→   - Отчёт по увольнениям (фильтры: период, подразделение)
+  1207→   - Отчёт по составу (фильтры: статус, организация)
+  1208→   - Календарный отчёт (фильтры: год, месяц, направление)
+  1209→
+  1210→**Связи:**
+  1211→- Данные загружаются через `/api/main-db/load` в in-memory кеш
+  1212→- Запросы данных через `/api/main-db/data` (пагинация, поиск, фильтры, сортировка)
+  1213→- Используется как источник данных для `fillByPassport()` и `fillByFuzzyFIO()` в панели билетов
+  1214→- Проверка статуса — сначала Node.js `/api/main-db/status`, затем Python backend (молча)
+  1215→
+  1216→---
+  1217→
+  1218→#### 🎫 Затраты на билеты (TicketExpensesPanel)
+  1219→
+  1220→**TabId:** `tickets`
+  1221→**Компонент:** `src/components/panels/TicketExpensesPanel.tsx`
+  1222→**Группа:** Данные
+  1223→**API:** `/api/tickets/*`
+  1224→
+  1225→**Три подвкладки:**
+  1226→
+  1227→1. **Дашборд:**
+  1228→   - KPI-карточки: всего билетов, общая сумма, средняя цена, уникальных сотрудников
+  1229→   - Сравнение организаций ВСП vs СК
+  1230→   - Топ-10 маршрутов (по количеству и сумме)
+  1231→   - Топ-10 сотрудников (по количеству поездок)
+  1232→   - Помесячная разбивка
+  1233→
+  1234→2. **Организация ВСП:**
+  1235→   - Загрузка Excel-файлов билетов
+  1236→   - Список исходных файлов
+  1237→   - Таблица данных (пагинация, поиск, фильтры, сортировка)
+  1238→   - **Действия по обработке:**
+  1239→     - `clean-tab-passport` — Очистка табельного номера и транслитерация паспорта
+  1240→     - `fill-passport` — Заполнение Табельный_1С и ФИО_1С по номеру паспорта
+  1241→     - `fill-fio-en` — Заполнение ФИО_1С на английском по Ф.И.О. на русском
+  1242→     - `fill-fio-fuzzy` — Нечёткий поиск ФИО в основной базе (Levenshtein distance, порог 70%)
+  1243→     - `fill-ploshchadka` — Заполнение Площадка по табельному номеру
+  1244→
+  1245→3. **Организация СК:** — Аналогично ВСП, но данные из `/upload/tickets_costs/sk/`
+  1246→
+  1247→**Связи:**
+  1248→- Зависит от основной базы (MainDatabase) для действий fill-passport, fill-fio-fuzzy, fill-ploshchadka
+  1249→- Данные кешируются в памяти (`ticketDataCache[vsm|sk]`)
+  1250→- Очередь загрузки — локальный React state (не глобальный store), чтобы избежать бесконечных ре-рендеров
+  1251→
+  1252→---
+  1253→
+  1254→#### 📅 Календарь Прилёт-Вылет (CalendarPanel)
+  1255→
+  1256→**TabId:** `calendar`
+  1257→**Компонент:** `src/components/panels/CalendarPanel.tsx`
+  1258→**Группа:** Данные
+  1259→**API:** `/api/main-db/*`, `/api/tickets/*`
+  1260→
+  1261→**Функциональность:**
+  1262→- Загрузка Excel-файлов (билеты, расписания)
+  1263→- Загрузка данных в основную базу
+  1264→- Отображение пагинированных данных о билетах
+  1265→- Фильтрация по году и месяцу
+  1266→- Визуализация дат прилёта и вылета
+  1267→
+  1268→---
+  1269→
+  1270→#### 📋 Ежедневный учёт (DailyTrackingPanel)
+  1271→
+  1272→**TabId:** `daily-tracking`
+  1273→**Компонент:** `src/components/panels/DailyTrackingPanel.tsx`
+  1274→**Группа:** Данные
+  1275→
+  1276→**Функциональность:**
+  1277→- **Карточки сводки:** На объекте, В командировке, В отпуске
+  1278→- **Таблица активности** — Лог событий (ФИО, действие, дата, подразделение)
+  1279→- **Форма добавления** — Новая запись (ФИО, тип, подразделение, дата, комментарий)
+  1280→- **Fallback площадки:** Когда бэкенд офлайн, показывает дефолтные площадки (ВСП, СК, Геленджик)
+  1281→- **Загрузка файлов:** Доступна даже при выборе «Все площадки» (не блокирует)
+  1282→- **UI-состояния:** Оранжевый баннер «Бэкенд не запущен» с подсказкой команды запуска
+  1283→
+  1284→---
+  1285→
+  1286→#### ⚙️ Настройки (SettingsPanel)
+  1287→
+  1288→**TabId:** `settings`
+  1289→**Компонент:** `src/components/panels/SettingsPanel.tsx`
+  1290→**Группа:** Система
+  1291→
+  1292→**4 подвкладки:**
+  1293→
+  1294→1. **Главная база (main-base):**
+  1295→   - Загрузка Excel-файла основной базы (JSON+base64 через `/api/main-db/load`)
+  1296→   - Статус базы (загружена/не загружена, строк, столбцов, память МБ)
+  1297→   - Управление данными: перезагрузка, очистка
+  1298→
+  1299→2. **Справочники (references):**
+  1300→   - Гражданство, Территории, Организации, Должности, Статусы, Направления
+  1301→
+  1302→3. **Модули (modules):** — Переключатель 6 модулей (вкл/выкл)
+  1303→
+  1304→4. **Авторизация (auth):** — Placeholder для будущей системы авторизации
+  1305→
+  1306→**Важно:** Сообщения о недоступности бэкенда логируются как `logInfo` (ожидаемое состояние), а не `logError`.
+  1307→
+  1308→---
+  1309→
+  1310→#### 🔧 Утилиты (UtilitiesPanel)
+  1311→
+  1312→**TabId:** `utilities`
+  1313→**Компонент:** `src/components/panels/UtilitiesPanel.tsx`
+  1314→**Группа:** Система
+  1315→**API:** `/api/utilities`
+  1316→
+  1317→**Два раздела:**
+  1318→
+  1319→1. **Python-утилиты (24 скрипта в 6 категориях):**
+  1320→
+  1321→   | Категория | Утилиты |
+  1322→   |-----------|---------|
+  1323→   | **Файлы** | file_organizer, file_organizer2, file_renamer, rename_tool, folderforge_pro_v3, Создание_папок, Создать_структуру2, Переименовать_файлы, Переименовать_файлы_по_назв_папки |
+  1324→   | **Excel** | ExcelHeaderComparator, Excel_Header_Comparator, XLSB_to_XLSX, excel_resaver, Анализ_и_структура_папки_и_EXCEL, apply_manual_mapping |
+  1325→   | **Транслитерация** | translit_passport, Транслит_ФИО_RU_EN, ФИО_перевод_RU-EN |
+  1326→   | **Билеты/Авиа** | Ticket_Parse, АвиаЖД_билеты_(из_pdf_в_Excel), АвиаЖД_билеты_(из_pdf_в_Excel)_only_RU |
+  1327→   | **Анализ** | Синтаксический_анализатор_Python-файлов, счёт_листов_в_ПДФ |
+  1328→   | **Email** | outlook_app |
+  1329→
+  1330→   Для каждой утилиты: просмотр исходного кода, скачивание .py файла, диалог запуска (аргументы, таймаут 10 сек), проверка зависимостей
+  1331→
+  1332→2. **Запуск приложений (App Launcher):** — 8 предустановленных ярлыков + произвольная команда
+  1333→
+  1334→---
+  1335→
+  1336→#### 📁 Файловый менеджер (FileManagerPanel)
+  1337→
+  1338→**TabId:** `file-manager`
+  1339→**Компонент:** `src/components/panels/FileManagerPanel.tsx`
+  1340→**Группа:** Система
+  1341→**API:** `/api/files`
+  1342→
+  1343→**Функциональность:**
+  1344→- Сетка / Список отображение
+  1345→- Навигация по хлебным крошкам
+  1346→- Поиск файлов по имени
+  1347→- Загрузка файлов (base64 → сервер)
+  1348→- Создание папки, переименование, удаление, скачивание
+  1349→- Статистика: типы файлов, размер хранилища
+  1350→- Рабочая директория: `/home/z/my-project/upload/` (Linux) или `process.cwd()/upload/` (Windows)
+  1351→
+  1352→---
+  1353→
+  1354→#### ⭐ Оценки (RatingsPanel)
+  1355→
+  1356→**TabId:** `ratings`
+  1357→**Компонент:** `src/components/panels/RatingsPanel.tsx`
+  1358→**Группа:** Отчёты
+  1359→
+  1360→**Функциональность (всё на mock-данных):**
+  1361→- Таблица рейтингов подразделений (сортируемая)
+  1362→- Топ-5 сотрудников с прогресс-баром
+  1363→- Диаграмма распределения оценок (1-5 баллов)
+  1364→- Хронология последних оценок
+  1365→
+  1366→---
+  1367→
+  1368→### 11.2. 🚧 Вкладки в разработке (UnderDevelopment)
+  1369→
+  1370→Все эти вкладки показывают компонент `UnderDevelopment` с анимацией строительства.
+  1371→
+  1372→| TabId | Название | Описание |
+  1373→|-------|----------|----------|
+  1374→| `experience` | Стаж | Учёт и расчёт стажа. Автоподсчёт общего, непрерывного и льготного стажа |
+  1375→| `carnet` | Карнет | Управление документами. Отслеживание сроков, уведомления о продлении |
+  1376→| `dismissed-report` | Уволенный персонал | Аналитика увольнений: причины, сроки, статистика по подразделениям |
+  1377→| `employment-costs` | Затраты на трудоустройство | Учёт затрат: билеты, проживание, питание, медкомиссии |
+  1378→| `mobilization-plan` | Мобилизация ОП | План мобилизации: графики, заявки, контроль исполнения |
+  1379→| `employee-path` | Путь сотрудника | Визуализация пути: от найма до текущей позиции |
+  1380→| `vba-lab` | VBA Лаборатория | Редактор макросов VBA и скриптов Python |
+  1381→| `file-prepare` | Подготовка файлов | Предобработка Excel: очистка, нормализация, валидация |
+  1382→| `integration` | Интеграция | Внешние системы: 1С, ERP, SAP, API |
+  1383→| `data-merge` | Слияние данных | Объединение из разных источников: база, справочники, билеты |
+  1384→
+  1385→---
+  1386→
+  1387→## 12. API-маршруты — полный справочник
+  1388→
+  1389→### 12.1. Аутентификация (NextAuth.js)
+  1390→
+  1391→| Маршрут | Метод | Описание |
+  1392→|---------|-------|----------|
+  1393→| `/api/auth/[...nextauth]` | GET/POST | NextAuth.js handler (вход, выход, сессия, callback) |
+  1394→| `/api/auth/signin` | GET | Страница входа (redirect на /login) |
+  1395→| `/api/auth/signout` | POST | Выход из системы |
+  1396→| `/api/auth/session` | GET | Текущая сессия (JSON) |
+  1397→
+  1398→### 12.2. Корневые маршруты
+  1399→
+  1400→| Маршрут | Метод | Описание |
+  1401→|---------|-------|----------|
+  1402→| `/api` | GET | Возвращает "Hello, world!" |
+  1403→| `/api/health` | GET | Проверка здоровья |
+  1404→| `/api/[...path]` | * | Catch-all 404 (бывший FastAPI прокси) |
+  1405→
+  1406→### 12.3. Основная база данных (Main DB)
+  1407→
+  1408→| Маршрут | Метод | Описание | Параметры |
+  1409→|---------|-------|----------|-----------|
+  1410→| `/api/main-db/status` | GET | Статус загрузки БД | — |
+  1411→| `/api/main-db/data` | POST | Запрос данных с пагинацией | `{ page, page_size, key_columns_only, search, sort_column, sort_direction, filter_column, filter_value, filters }` |
+  1412→| `/api/main-db/load` | POST | Загрузка Excel → in-memory | `{ filePath? }` |
+  1413→| `/api/main-db/columns` | GET | Метаданные столбцов | — |
+  1414→| `/api/main-db/stats` | GET | Статистика БД | — |
+  1415→| `/api/main-db/clear` | DELETE | Очистка in-memory базы | — |
+  1416→
+  1417→### 12.4. Билеты (Tickets)
+  1418→
+  1419→| Маршрут | Метод | Описание | Параметры |
+  1420→|---------|-------|----------|-----------|
+  1421→| `/api/tickets/list` | GET | Список файлов билетов | — |
+  1422→| `/api/tickets/summary` | GET | Сводная статистика | — |
+  1423→| `/api/tickets/analyze` | POST | Анализ данных билетов | — |
+  1424→| `/api/tickets/dashboard` | GET | Данные дашборда | `?org=vsm\|sk` |
+  1425→| `/api/tickets/table-data` | POST | Пагинированные данные таблицы | `{ org, page, page_size, search, filters, sort_column, sort_direction }` |
+  1426→| `/api/tickets/table-action` | POST | Действия обработки | `{ action: clean-tab-passport\|fill-passport\|fill-fio-en\|fill-fio-fuzzy\|fill-ploshchadka, org }` |
+  1427→| `/api/tickets/source-files` | GET | Исходные файлы | `?org=vsm\|sk` |
+  1428→| `/api/tickets/filter-options` | GET | Опции фильтров | `?org=vsm\|sk` |
+  1429→| `/api/tickets/bulk-upload` | POST/GET | Загрузка файлов билетов | JSON+base64 |
+  1430→| `/api/tickets/process` | POST | История обработки | — |
+  1431→| `/api/tickets/clear-registry` | POST | Очистка реестра | — |
+  1432→| `/api/tickets/clear-source-files` | POST | Очистка исходных файлов | — |
+  1433→| `/api/tickets/data/[id]` | GET | Данные билета по ID | — |
+  1434→
+  1435→### 12.5. Excel-файлы
+  1436→
+  1437→| Маршрут | Метод | Описание |
+  1438→|---------|-------|----------|
+  1439→| `/api/excel/list` | GET | Список Excel-файлов (Prisma) |
+  1440→| `/api/excel/files` | GET | Список файлов с диска |
+  1441→| `/api/excel/files/[id]` | GET/DELETE | Получить/удалить файл |
+  1442→| `/api/excel/sheet-data` | GET | Чтение данных листа |
+  1443→| `/api/excel/[...path]` | * | Прокси к FastAPI (legacy) |
+  1444→
+  1445→### 12.6. Файловый менеджер
+  1446→
+  1447→| Маршрут | Метод | Описание | Параметры |
+  1448→|---------|-------|----------|-----------|
+  1449→| `/api/files` | GET | Список/поиск/скачивание | `?action=list\|search\|download&path=&q=` |
+  1450→| `/api/files` | DELETE | Удаление файла/папки | `{ path }` |
+  1451→| `/api/files` | POST | Загрузка/создание папки/переименование | `{ action: upload\|mkdir\|rename, ... }` |
+  1452→
+  1453→### 12.7. Утилиты
+  1454→
+  1455→| Маршрут | Метод | Описание | Параметры |
+  1456→|---------|-------|----------|-----------|
+  1457→| `/api/utilities` | GET | Список/исходник/скачивание | `?action=list\|source\|download&name=` |
+  1458→| `/api/utilities` | POST | Запуск утилиты | `{ name, args, timeout? }` (default timeout: 10 сек) |
+  1459→
+  1460→### 12.8. Прочие
+  1461→
+  1462→| Маршрут | Метод | Описание |
+  1463→|---------|-------|----------|
+  1464→| `/api/main-database/list` | GET | Список MainDatabase (Prisma) |
+  1465→| `/api/main-database/status` | GET | Активная MainDatabase (Prisma) |
+  1466→| `/api/ticket-expenses/list` | GET | Список TicketExpense (Prisma) |
+  1467→| `/api/daily-accounting/list` | GET | Список записей (Prisma) |
+  1468→| `/api/reports/filters` | GET | Опции фильтров отчётов |
+  1469→| `/api/reports/generate` | POST | Генерация отчёта |
+  1470→| `/api/excel-proxy` | * | Прокси к FastAPI 3031 (legacy) |
+  1471→
+  1472→### 12.9. Аналитика (DuckDB) — НОВОЕ
+  1473→
+  1474→| Маршрут | Метод | Описание | Параметры |
+  1475→|---------|-------|----------|-----------|
+  1476→| `/api/analytics` | POST | Аналитический SQL-запрос | `{ query }` или `{ table, dateColumn, startDate, endDate }` |
+  1477→| `/api/analytics` | GET | Метаданные: список архивов, путь к БД | — |
+  1478→
+  1479→**Безопасность:** Только `SELECT`/`WITH` запросы. INSERT/UPDATE/DELETE → 403.
+  1480→
+  1481→### 12.10. Архивация — НОВОЕ
+  1482→
+  1483→| Маршрут | Метод | Описание | Параметры |
+  1484→|---------|-------|----------|-----------|
+  1485→| `/api/archive` | POST | Архивация данных за месяц | `{ yearMonth: "2025-01" }` или `{ auto: true }` |
+  1486→| `/api/archive` | GET | Список архивов + размер | — |
+  1487→| `/api/archive` | GET | Превью записей из архива | `?yearMonth=2025-01&table=FlightEvent&limit=100` |
+  1488→
+  1489→---
+  1490→
+  1491→## 13. Серверная обработка Excel (excel-server.ts)
+  1492→
+  1493→**Файл:** `src/lib/excel-server.ts` (55KB!)
+  1494→**Назначение:** Полная замена Python FastAPI бэкенда
+  1495→
+  1496→### 13.1. In-memory кеши
+  1497→
+  1498→```typescript
+  1499→// Кеш основной базы (переживает HMR через globalThis)
+  1500→mainDbCache: MainDbCache | null
+  1501→  ├── df: Record<string, unknown>[]       // Массив строк данных (113K+)
+  1502→  ├── columns: ColumnMeta[]               // Метаданные столбцов
+  1503→  └── metadata: { file_name, file_path, total_rows, total_cols, loaded_at }
+  1504→
+  1505→// Кеш файлов билетов
+  1506→ticketCache: Record<string, TicketCacheEntry>
+  1507→
+  1508→// Кеш распарсенных данных билетов по организациям
+  1509→ticketDataCache: Record<string, TicketDataCache>
+  1510→  └── [org: 'vsm'|'sk']: { rows, columns, loadedAt, fileCount }
+  1511→```
+  1512→
+  1513→### 13.2. Экспортируемые функции
+  1514→
+  1515→| Функция | Описание |
+  1516→|---------|----------|
+  1517→| `healthCheck()` | Проверка здоровья сервиса |
+  1518→| `getUploadDir()` | Путь к /upload |
+  1519→| `ensureDir(dir)` | Создание директории (recursive) |
+  1520→| `saveUploadedFile(buffer, name, category)` | Сохранение файла на диск |
+  1521→| `getMainDbStatus()` | Статус основной БД |
+  1522→| `loadMainDb(filePath?)` | Загрузка Excel → in-memory кеш |
+  1523→| `getMainDbData(params)` | Запрос данных (пагинация, поиск, фильтры, сортировка) |
+  1524→| `getMainDbColumns()` | Метаданные столбцов |
+  1525→| `getMainDbStats()` | Статистика (память, ключ. столбцы) |
+  1526→| `searchMainDb(params)` | Поиск по базе |
+  1527→| `clearMainDb()` | Очистка in-memory кеша |
+  1528→| `getTicketList()` | Список файлов билетов |
+  1529→| `getTicketData(fileId, page, pageSize)` | Данные конкретного файла |
+  1530→| `getTicketSummary()` | Сводная статистика билетов |
+  1531→| `analyzeTickets()` | Анализ всех файлов билетов |
+  1532→| `bulkUploadTickets(files, org)` | Пакетная загрузка билетов |
+  1533→| `getTicketDashboard(org)` | Данные дашборда |
+  1534→| `getTicketFilterOptions(org)` | Опции фильтров |
+  1535→| `getTicketTableData(params)` | Пагинированные данные таблицы |
+  1536→| `cleanTabPassport(org)` | Очистка табельного номера + транслитерация паспорта |
+  1537→| `fillByPassport(org)` | Заполнение по номеру паспорта из основной базы |
+  1538→| `fillByFIOEn(org)` | Заполнение ФИО на английском (транслитерация) |
+  1539→| `fillByFuzzyFIO(org)` | Нечёткий поиск ФИО (Levenshtein, порог 70%) |
+  1540→| `fillByPloshchadka(org)` | Заполнение Площадка из основной базы |
+  1541→| `getReportFilters()` | Опции фильтров отчётов |
+  1542→| `generateReport(params)` | Генерация отчёта (заглушка) |
+  1543→
+  1544→### 13.3. Внутренние алгоритмы
+  1545→
+  1546→- **readExcelToRows()** — Стандартное чтение через SheetJS
+  1547→- **readTicketExcelToRows()** — Чтение с авто-поиском строки заголовков (сканирует первые 15 строк)
+  1548→- **transliterateLatToCyr() / transliterateCyrToLat()** — Кириллица ↔ Латиница
+  1549→- **levenshteinDistance()** — Расстояние Левенштейна (DP-алгоритм)
+  1550→- **similarityPercent()** — Процент схожести (0-100), порог 70% для match
+  1551→- **detectMonth()** — Извлечение месяца из имени файла
+  1552→- **detectCategory()** — Категория по ключевым словам
+  1553→
+  1554→### 13.4. Ключевые столбцы
+  1555→
+  1556→13 ключевых столбцов по индексам: `[0, 1, 2, 3, 4, 5, 6, 8, 10, 11, 12, 13]`
+  1557→
+  1558→---
+  1559→
+  1560→## 14. Python-утилиты
+  1561→
+  1562→**Директория:** `/home/z/my-project/utilities/`
+  1563→**Количество:** 24 скрипта
+  1564→
+  1565→### Категории
+  1566→
+  1567→| Категория | Количество | Скрипты |
+  1568→|-----------|-----------|---------|
+  1569→| **Файлы** | 9 | file_organizer, file_organizer2, file_renamer, rename_tool, folderforge_pro_v3, Создание_папок, Создать_структуру2, Переименовать_файлы, Переименовать_файлы_по_назв_папки |
+  1570→| **Excel** | 6 | ExcelHeaderComparator, Excel_Header_Comparator, XLSB_to_XLSX, excel_resaver, Анализ_и_структура_папки_и_EXCEL, apply_manual_mapping |
+  1571→| **Транслитерация** | 3 | translit_passport, Транслит_ФИО_RU_EN, ФИО_перевод_RU-EN |
+  1572→| **Билеты/Авиа** | 3 | Ticket_Parse, АвиаЖД_билеты_(из_pdf_в_Excel), АвиаЖД_билеты_(из_pdf_в_Excel)_only_RU |
+  1573→| **Анализ** | 2 | Синтаксический_анализатор_Python-файлов, счёт_листов_в_ПДФ |
+  1574→| **Email** | 1 | outlook_app |
+  1575→
+  1576→Запуск: `POST /api/utilities { name, args, timeout }` → `python3 {utilities_dir}/{name} {args}` через child_process
+  1577→
+  1578→---
+  1579→
+  1580→## 15. Боковая панель (Sidebar)
+  1581→
+  1582→**Компонент:** `src/components/AppSidebar.tsx`
+  1583→**Базовый:** Shadcn/UI Sidebar (collapsible="icon")
+  1584→
+  1585→**4 группы навигации:**
+  1586→
+  1587→| Группа | Ключ | Пунктов |
+  1588→|--------|------|---------|
+  1589→| Главная | main | 1 (Dashboard) |
+  1590→| Данные | data | 7 |
+  1591→| Отчёты | reports | 4 |
+  1592→| Система | system | 7 |
+  1593→
+  1594→Каждый пункт: Иконка (Lucide) в цветном квадрате + Название + Описание + WIP-бейдж (если не работает) + Зелёная полоса слева (если активен)
+  1595→
+  1596→Функции: сворачивание, тултипы, статус бэкенда, счётчик модулей, версия
+  1597→
+  1598→---
+  1599→
+  1600→## 16. Главная страница (Dashboard)
+  1601→
+  1602→**Компонент:** Интегрирован в `src/app/page.tsx`
+  1603→
+  1604→Два режима:
+  1605→1. **Dashboard** — Приветствие, часы, бегущая строка, статистика, модули, таблицы, монитор здоровья
+  1606→2. **Панель** — Хлебные крошки + динамически загруженная панель
+  1607→
+  1608→Динамический импорт: все панели через `next/dynamic` с `ssr: false`
+  1609→
+  1610→---
+  1611→
+  1612→## 17. Темы оформления
+  1613→
+  1614→**3 темы:**
+  1615→1. **Color (Amber/Orange)** — Корпоративная VSM, oklch-based тёплые тона
+  1616→2. **Light** — Минималистичная светлая
+  1617→3. **Dark** — Тёмная
+  1618→
+  1619→**CSS-анимации:** ticker, card-entrance, pulse-glow, progress-fill, slide-in-right, line-clamp
+  1620→
+  1621→---
+  1622→
+  1623→## 18. Инфраструктура и развёртывание
+  1624→
+  1625→### Порты
+  1626→
+  1627→| Сервис | Порт | Статус |
+  1628→|--------|------|--------|
+  1629→| Next.js | 3000 | ✅ |
+  1630→| Caddy Proxy | 81 | ✅ |
+  1631→| FastAPI | 3031 | ❌ Декомиссирован |
+  1632→
+  1633→### Caddy
+  1634→- Порт 81 → прокси на localhost:3000
+  1635→- `XTransformPort` для маршрутизации на другие порты
+  1636→- Таймауты: read/write 300s, dial 30s
+  1637→- **Критическое ограничение:** ломает multipart/form-data → JSON+base64
+  1638→
+  1639→### Next.js конфигурация
+  1640→- `output: "standalone"`, `bodySizeLimit: 100MB`, `ignoreBuildErrors: true`
+  1641→- `experimental.turbopackUseSystemTlsCerts: true` — для обхода SSL-проблем с корпоративными прокси
+  1642→
+  1643→### Переменные окружения (.env)
+  1644→
+  1645→```bash
+  1646→# База данных
+  1647→DATABASE_URL=file:/home/z/my-project/db/custom.db
+  1648→
+  1649→# NextAuth.js
+  1650→NEXTAUTH_URL=http://localhost:3000
+  1651→NEXTAUTH_SECRET=vsm-dev-secret-change-in-production
+  1652→```
+  1653→
+  1654→### Скрипты
+  1655→
+  1656→| Команда | Описание |
+  1657→|---------|----------|
+  1658→| `bun run dev` | Dev-сервер :3000 |
+  1659→| `bun run build` | Production build |
+  1660→| `bun run lint` | ESLint |
+  1661→| `bun run db:push` | Push Prisma схемы в БД |
+  1662→| `bun run db:generate` | Генерация Prisma клиента |
+  1663→| `bun run db:seed` | Создание стартовых пользователей |
+  1664→
+  1665→### Формат дат
+  1666→Все даты в формате **ДД.ММ.ГГГГ** через `formatDateDDMMYYYY()` из `src/lib/utils.ts`
+  1667→
+  1668→---
+  1669→
+  1670→## 19. Локальный запуск на Windows
+  1671→
+  1672→### 19.1. Требования
+  1673→
+  1674→- **Node.js** 20+ или **Bun** latest
+  1675→- **Python** 3.10+ (для утилит, опционально)
+  1676→- **Git** (для клонирования репозитория)
+  1677→
+  1678→### 19.2. Установка
+  1679→
+  1680→```powershell
+  1681→# 1. Клонировать репозиторий
+  1682→cd C:\My_Project
+  1683→git clone https://github.com/VelesstroyMontazh/VSM_OMIK_2.git vsm-code-only
+  1684→cd vsm-code-only
+  1685→
+  1686→# 2. Установить зависимости
+  1687→bun install
+  1688→# или: npm install
+  1689→
+  1690→# 3. Настроить .env (см. ниже)
+  1691→
+  1692→# 4. Сгенерировать Prisma клиент
+  1693→npx prisma generate
+  1694→
+  1695→# 5. Создать БД и применить схему
+  1696→npx prisma db push
+  1697→
+  1698→# 6. Создать стартовых пользователей
+  1699→bun run db:seed
+  1700→
+  1701→# 7. Запустить dev-сервер
+  1702→bun run dev
+  1703→```
+  1704→
+  1705→### 19.3. .env для Windows
+  1706→
+  1707→```bash
+  1708→# Используйте прямые слеши! Обратные слеши вызовут ошибку "url must start with protocol file:"
+  1709→DATABASE_URL=file:C:/My_Project/vsm-code-only/db/custom.db
+  1710→
+  1711→NEXTAUTH_URL=http://localhost:3000
+  1712→NEXTAUTH_SECRET=vsm-dev-secret-change-in-production
+  1713→```
+  1714→
+  1715→### 19.4. Решение проблем на Windows
+  1716→
+  1717→#### SSL-ошибки при скачивании Prisma engines
+  1718→
+  1719→Корпоративные прокси могут перехватывать SSL-трафик. Решение:
+  1720→
+  1721→```powershell
+  1722→# PowerShell
+  1723→$env:NODE_TLS_REJECT_UNAUTHORIZED="0"
+  1724→bun install
+  1725→npx prisma generate
+  1726→```
+  1727→
+  1728→Также в `next.config.ts` добавлен флаг:
+  1729→
+  1730→```typescript
+  1731→experimental: {
+  1732→  turbopackUseSystemTlsCerts: true,
+  1733→}
+  1734→```
+  1735→
+  1736→#### Ошибка "url must start with protocol file:"
+  1737→
+  1738→**Причина:** Обратные слеши в пути.
+  1739→
+  1740→```bash
+  1741→# ❌ Неправильно
+  1742→DATABASE_URL=file:C:\My_Project\vsm-code-only\db\custom.db
+  1743→
+  1744→# ✅ Правильно (прямые слеши)
+  1745→DATABASE_URL=file:C:/My_Project/vsm-code-only/db/custom.db
+  1746→```
+  1747→
+  1748→#### Ошибка "Required column `filePath` cannot be added to non-empty table"
+  1749→
+  1750→При изменении схемы на существующей БД с данными:
+  1751→
+  1752→```powershell
+  1753→npx prisma db push --force-reset
+  1754→```
+  1755→
+  1756→**Внимание:** `--force-reset` удаляет все данные! Используйте только при разработке.
+  1757→
+  1758→#### Google Fonts TLS-ошибка
+  1759→
+  1760→Если `next/font/google` не загружает шрифты из-за SSL:
+  1761→
+  1762→Шрифты Geist/Geist_Mono удалены из `layout.tsx`, используются системные шрифты.
+  1763→
+  1764→#### Prisma 7.x incompatibility
+  1765→
+  1766→**Важно:** Не обновляйте Prisma до 7.x! Версия 7 убрала поле `url` из datasource block.
+  1767→
+  1768→В `package.json` версия пинится без `^`:
+  1769→
+  1770→```json
+  1771→"@prisma/client": "6.11.1",
+  1772→"prisma": "6.11.1"
+  1773→```
+  1774→
+  1775→#### Dev-скрипт для Windows
+  1776→
+  1777→Оригинальный скрипт использовал Unix-only синтаксис `2>&1 | tee`. Исправлено:
+  1778→
+  1779→```json
+  1780→"dev": "next dev -p 3000"
+  1781→```
+  1782→
+  1783→#### ModuleNotFoundError: browse_dialog
+  1784→
+  1785→Файл `mini-services/excel-service/browse_dialog.py` — stub (tkinter недоступен в headless-режиме). Возвращает ошибку-словарь вместо краша.
+  1786→
+  1787→### 19.5. Доступ к приложению
+  1788→
+  1789→После запуска `bun run dev`:
+  1790→
+  1791→- **Локально:** http://localhost:3000
+  1792→- **Логин:** admin / admin123
+  1793→- **Демо-пользователи:** user1/user123 (workspace: vsm), user2/user123 (workspace: sk)
+  1794→
+  1795→---
+  1796→
+  1797→## 20. Потоки данных и связи между модулями
+  1798→
+  1799→### Загрузка основной базы
+  1800→```
+  1801→SettingsPanel (загрузка) → POST /api/main-db/load → excel-server.loadMainDb()
+  1802→→ SheetJS: XLSX.read() → JSON → mainDbCache (globalThis)
+  1803→→ Dashboard: GET /api/main-db/status → обновление UI (молча)
+  1804→→ MainDatabasePanel: POST /api/main-db/data → пагинированный запрос
+  1805→```
+  1806→
+  1807→### Обработка билетов
+  1808→```
+  1809→TicketExpensesPanel (загрузка) → POST /api/tickets/bulk-upload → bulkUploadTickets()
+  1810→→ Сохранение в /upload/tickets_costs/{org}/ → Инвалидация ticketDataCache
+  1811→→ table-action: fill-passport/fill-fio-fuzzy/fill-ploshchadka → Поиск в mainDbCache
+  1812→```
+  1813→
+  1814→### Запуск Python-утилит
+  1815→```
+  1816→UtilitiesPanel → POST /api/utilities { name, args, timeout }
+  1817→→ child_process.execFile("python3", [utilities/name, ...args]) → Результат → UI
+  1818→```
+  1819→
+  1820→### Аутентификация пользователя
+  1821→```
+  1822→/login → signIn('credentials') → POST /api/auth/callback/credentials
+  1823→→ authorize() → db.user.findUnique (withRetry) → bcrypt.compare
+  1824→→ JWT token (8h) → Cookie → middleware проверяет на каждом запросе
+  1825→→ getCurrentUser() в server components/API routes
+  1826→```
+  1827→
+  1828→### Многопользовательская запись файла
+  1829→```
+  1830→Пользователь A загружает файл → getCurrentUser() → userId: "user-aaa"
+  1831→→ withRetry(() => db.excelFile.create({ data: { ..., userId: "user-aaa" } }))
+  1832→→ Пользователь B видит только свои файлы (where: { userId: "user-bbb" })
+  1833→```
+  1834→
+  1835→### Диаграмма связей модулей
+  1836→```
+  1837→Dashboard ←→ MainDatabasePanel ←→ excel-server.ts (in-memory)
+  1838→                  ↑
+  1839→TicketExpensesPanel → fill-by-passport/fuzzy-FIO/ploshchadka
+  1840→CalendarPanel → read mainDb data
+  1841→SettingsPanel → /api/main-db/load
+  1842→UtilitiesPanel → /api/utilities → Python scripts
+  1843→FileManagerPanel → /api/files → /upload/ dir
+  1844→RatingsPanel → (mock data)
+  1845→DailyTrackingPanel → (mock data + fallback площадки)
+  1846→
+  1847→NextAuth.js → middleware → защищает все маршруты
+  1848→getCurrentUser() → userId → изоляция данных в Prisma
+  1849→```
+  1850→
+  1851→---
+  1852→
+  1853→## 21. Известные проблемы и ограничения
+  1854→
+  1855→### Критические
+  1856→1. **502 Bad Gateway при загрузке** — Долгая обработка XLSX.read() блокирует event loop
+  1857→2. **Caddy ломает multipart/form-data** — Обход через JSON+base64 (на 33% больше размер)
+  1858→
+  1859→### Производительность
+  1860→3. **113K+ записей в памяти** — ~100+ МБ RAM
+  1861→4. **Нет виртуализации таблиц** — Пагинация без виртуализации
+  1862→5. **SheetJS segfault** — На больших файлах в Turbopack
+  1863→
+  1864→### Многопользовательский режим
+  1865→6. **In-memory кеш общей базы — глобальный** — Основная база сотрудников (mainDbCache) хранится в `globalThis` и **не изолирована** между пользователями. Все пользователи видят одну и ту же загруженную базу. Изоляция `userId` применяется только к метаданным в SQLite (ExcelFile, FileRecord и т.д.).
+  1866→7. **WAL checkpoint** — При большом количестве записей WAL-файл может расти. SQLite автоматически выполняет checkpoint, но при экстремальной нагрузке может потребоваться ручной `PRAGMA wal_checkpoint(TRUNCATE)`.
+  1867→
+  1868→### Функциональные
+  1869→8. **Mock-данные** — DailyTracking, Ratings, Dashboard stats
+  1870→9. **10 из 19 вкладок в разработке**
+  1871→10. **Нет кнопки «Очистить»** — Для загрузок DailyTracking
+  1872→11. **Нет persisted state** — Zustand stores не персистятся
+  1873→
+  1874→---
+  1875→
+  1876→## 22. Планы развития
+  1877→
+  1878→### Приоритет: Высокий
+  1879→- [x] ~~Аутентификация (NextAuth.js + credentials provider)~~ ✅ Выполнено
+  1880→- [x] ~~SQLite WAL + busy_timeout + retry для 20 пользователей~~ ✅ Выполнено
+  1881→- [x] ~~Многопользовательская изоляция (userId на всех моделях)~~ ✅ Выполнено
+  1882→- [x] ~~Доменные таблицы (DailyTrackingRecord, FlightEvent, TicketRecord, RatingRecord)~~ ✅ Выполнено
+  1883→- [x] ~~Worker Thread Pool для парсинга Excel (4 воркера, FIFO, прогресс)~~ ✅ Выполнено
+  1884→- [x] ~~DuckDB для аналитических запросов (sqlite_scan, cross-period)~~ ✅ Выполнено
+  1885→- [x] ~~Месячная архивация (archive-YYYY-MM.db + cron)~~ ✅ Выполнено
+  1886→- [ ] Виртуализация таблиц (@tanstack/react-virtual)
+  1887→- [ ] Решение 502 при загрузке (Worker Thread / streaming)
+  1888→- [ ] Изоляция in-memory кеша основной базы по workspace
+  1889→- [ ] Кнопка «Активировать» в Settings → БАЗА
+  1890→
+  1891→### Приоритет: Средний
+  1892→- [ ] Вкладка «Оценки» — Многоканальная загрузка реестров оценок за полугодие
+  1893→- [ ] Вкладка «Стаж» — Расчёт стажа из основной базы
+  1894→- [ ] Вкладка «Уволенный персонал» — Отчёт по уволенным
+  1895→- [ ] Вкладка «Мобилизация ОП» — План мобилизации
+  1896→- [ ] Кнопка «Очистить» для DailyTracking
+  1897→- [ ] Persisted state (Zustand persist middleware)
+  1898→- [ ] Реструктуризация шапки: бегущая строка, логин/пароль, кнопка «Назад», колокол
+  1899→- [ ] Сокращение вкладок (удалить Справочники и Реестр билетов)
+  1900→- [ ] Замена времени на календарь+время виджет
+  1901→- [ ] Детальные статус-бары для каждого действия
+  1902→- [ ] Фоновая загрузка файлов при переключении вкладок
+  1903→- [ ] Персистентное хранение файлов в БД
+  1904→
+  1905→### Приоритет: Низкий
+  1906→- [ ] Вкладки: Карнет, Путь сотрудника, VBA Лаборатория, Интеграция, Слияние данных, Подготовка файлов
+  1907→- [ ] Реальные данные для Ratings и DailyTracking
+  1908→- [ ] Реальные данные для Dashboard статистики
+  1909→- [ ] Реструктуризация Справочников (удалить Login_Pass_Status.xlsx, добавить Role_OP.xlsx и Log_pass_role.xlsx)
+  1910→- [ ] Отображение данных Оценок в Карточке сотрудника
+  1911→
+  1912→---
+  1913→
+  1914→*Документация сгенерирована на основе исходного кода проекта VSM ОМиК.*
+  1915→*Версия 1.1 — добавлены разделы: аутентификация, SQLite WAL, локальный запуск на Windows.*
+  1916→

@@ -1,0 +1,104 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  passwordHash String
+  displayName  String   @default("")
+  role         String   @default("user")
+  workspace    String   @default("default")
+  isActive     Boolean  @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  excelFiles   ExcelFile[]
+  operations   Operation[]
+}
+
+model ExcelFile {
+  id           String    @id @default(cuid())
+  name         String
+  originalName String
+  filePath     String
+  fileSize     Int       @default(0)
+  sheetName    String    @default("Лист1")
+  totalRows    Int       @default(0)
+  totalCols    Int       @default(0)
+  category     String    @default("general")
+  status       String    @default("uploaded")
+  isActive     Boolean   @default(false)
+  loadedAt     DateTime  @default(now())
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  userId       String?
+  user         User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+}
+
+model DashboardStat {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String
+  intValue  Int      @default(0)
+  updatedAt DateTime @updatedAt
+}
+
+model DailyRecord {
+  id            String   @id @default(cuid())
+  tabNumber     String
+  fullName      String
+  site          String   @default("")
+  region        String   @default("")
+  visaStatus    String   @default("")
+  actualPosition String  @default("")
+  arrivalDate   String   @default("")
+  status        String   @default("на площадке")
+  category      String   @default("daily")
+  recordDate    String   @default("")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model HrEvent {
+  id            String   @id @default(cuid())
+  tabNumber     String
+  fullName      String
+  eventType     String
+  eventDate     String
+  department    String   @default("")
+  position      String   @default("")
+  basis         String   @default("")
+  sourceFile    String   @default("")
+  createdAt     DateTime @default(now())
+}
+
+model FlightEvent {
+  id            String   @id @default(cuid())
+  fullName      String   @default("")
+  fullNameEn    String   @default("")
+  tabNumber     String   @default("")
+  site          String   @default("")
+  route         String   @default("")
+  flightDate    String   @default("")
+  ticketPrice   Float    @default(0)
+  ticketType    String   @default("")
+  org           String   @default("vsm")
+  sourceFile    String   @default("")
+  createdAt     DateTime @default(now())
+}
+
+model Operation {
+  id        String   @id @default(cuid())
+  type      String
+  fileId    String?
+  details   String?
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  createdAt DateTime @default(now())
+}

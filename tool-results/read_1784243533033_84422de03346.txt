@@ -1,0 +1,973 @@
+     1→# OMiK_VSM — Полная документация системы
+     2→
+     3→> **Версия:** 0.2.0 (UI header: v1.0)
+     4→> **Организация:** ООО «ВелесстройМонтаж» — Отдел мобилизации и координации персонала (ОМиК)
+     5→> **Путь проекта:** `C:\My_Project\omik-project`
+     6→> **Обновлено:** июль 2026 — Unified SQLite + Хронология v4.1 + Кандидаты + Ежедневный учёт + Затраты по билетам
+     7→
+     8→---
+     9→
+    10→## Содержание
+    11→
+    12→1. [Общее описание системы](#1-общее-описание-системы)
+    13→2. [Архитектура и технологический стек](#2-архитектура-и-технологический-стек)
+    14→3. [Структура проекта](#3-структура-проекта)
+    15→4. [База данных (Prisma + Unified SQLite)](#4-база-данных-prisma--unified-sqlite)
+    16→5. [Аутентификация и RBAC](#5-аутентификация-и-rbac)
+    17→6. [SQLite WAL и единая БД](#6-sqlite-wal-и-единая-бд)
+    18→7. [Python excel-service (FastAPI)](#7-python-excel-service-fastapi)
+    19→8. [Кэш вкладок и производительность UI](#8-кэш-вкладок-и-производительность-ui)
+    20→9. [Состояние приложения (Zustand Stores)](#9-состояние-приложения-zustand-stores)
+    21→10. [Главный экран (Welcome) и модули](#10-главный-экран-welcome-и-модули)
+    22→11. [Вкладки и панели — подробное описание](#11-вкладки-и-панели--подробное-описание)
+    23→12. [Управление данными (Settings)](#12-управление-данными-settings)
+    24→13. [API-маршруты — справочник](#13-api-маршруты--справочник)
+    25→14. [Бизнес-правила](#14-бизнес-правила)
+    26→15. [Потоки данных и связи модулей](#15-потоки-данных-и-связи-модулей)
+    27→16. [Инфраструктура и развёртывание](#16-инфраструктура-и-развёртывание)
+    28→17. [Локальный запуск на Windows](#17-локальный-запуск-на-windows)
+    29→18. [Известные проблемы и ограничения](#18-известные-проблемы-и-ограничения)
+    30→19. [Планы развития](#19-планы-развития)
+    31→20. [Связанная документация](#20-связанная-документация)
+    32→
+    33→---
+    34→
+    35→## 1. Общее описание системы
+    36→
+    37→**OMiK_VSM** — корпоративная информационная система для отдела мобилизации и координации персонала строительной компании «ВелесстройМонтаж» и связанных юрлиц (ВСМ, СК и др.). Система обеспечивает:
+    38→
+    39→- **Управление основной базой сотрудников** (112 000+ записей из выгрузки 1С)
+    40→- **Ежедневный учёт персонала** (подвкладки: На площадке / Дома / Статистика)
+    41→- **Кандидаты** (На сегодня, Дни оформления, Общая статистика; сопоставление с БД по ФИО+ДР, затем паспорт)
+    42→- **Статистику по площадкам** (KPI: на площадке, дома, кандидаты, АУП/ИТР/РОП)
+    43→- **Календарь прилёта–вылета**
+    44→- **Учёт затрат на авиа-/ЖД-билеты** (организации ВСМ и СК; отдельная очередь загрузки)
+    45→- **Хронологию Приёма, Перевода и Увольнения** (v4.1: `employee_chronology.py` + `hr_events_store.py`)
+    46→- **Оценки сотрудников** (реестры по полугодиям, сравнение с БД)
+    47→- **Работу с Excel** (загрузка, просмотр, объединение, подготовка файлов, VBA-лаборатория)
+    48→- **Интеграцию с Outlook** (сканирование почты и вложений — только Windows)
+    49→- **Многопользовательский режим** с RBAC (роли, группы, доступ к площадкам)
+    50→- **Управление пользователями** и отдельный пароль панели «Управление данными»
+    51→
+    52→Система построена как **веб-приложение на главном экране (Welcome)** с карточками модулей: после логина открывается трёхколоночный дашборд, модули открываются поверх (keep-alive: панель скрывается, не размонтируется). Тяжёлая обработка Excel и доменных данных выполняется в **Python FastAPI excel-service** на порту **3031**; UI и прокси — **Next.js 16** на порту **3000**.
+    53→
+    54→**Платформа:** Windows 11, нативный запуск без Docker/Kubernetes/Podman. Формат дат во всём UI: **ДД.ММ.ГГГГ**.
+    55→
+    56→---
+    57→
+    58→## 2. Архитектура и технологический стек
+    59→
+    60→### 2.1. Высокоуровневая архитектура
+    61→
+    62→```
+    63→┌──────────────────────────────────────────────────────────────────┐
+    64→│                        Браузер (Client)                          │
+    65→│  ┌──────────────┐  ┌──────────────┐  ┌────────────────────────┐ │
+    66→│  │  React 19    │  │  Zustand     │  │  Shadcn/UI + Tailwind  │ │
+    67→│  │  Next.js 16  │  │  Stores      │  │  Excel panels / grids  │ │
+    68→│  └──────┬───────┘  └──────┬───────┘  └────────────────────────┘ │
+    69→│         │                 │                                      │
+    70→│         └────────┬────────┘                                      │
+    71→└──────────────────┼───────────────────────────────────────────────┘
+    72→                   │ cookie omik_session + CSRF + fetch JSON
+    73→┌──────────────────┼───────────────────────────────────────────────┐
+    74→│                  ▼     Node / Bun                                 │
+    75→│  ┌───────────────────────────────────────────────────────────┐   │
+    76→│  │           Next.js 16 (App Router, port 3000)              │   │
+    77→│  │  ┌─────────────┐  ┌───────────────┐  ┌────────────────┐  │   │
+    78→│  │  │ /api/excel/*│  │ Prisma ORM    │  │ Session table  │  │   │
+    79→│  │  │ proxy+auth  │  │ (SQLite)      │  │ custom.db      │  │   │
+    80→│  │  └──────┬──────┘  └───────┬───────┘  └───────┬────────┘  │   │
+    81→│  │         │ X-OMIK-Token     │                   │           │   │
+    82→│  │         │ X-OMIK-Role      │                   │           │   │
+    83→│  │         │ X-OMIK-Sites     │                   │           │   │
+    84→│  └─────────┼──────────────────┼───────────────────┼───────────┘   │
+    85→│            │                  │                   │               │
+    86→│            ▼                  └─────────┬─────────┘               │
+    87→│  ┌─────────────────────────────┐        │                         │
+    88→│  │ excel-service (FastAPI)     │◄───────┘ unified_db.py           │
+    89→│  │ uvicorn, 1 worker, :3031    │        db/custom.db              │
+    90→│  │ daily_tracking, main_db,    │                                  │
+    91→│  │ tickets, hr_events, ...     │──► %LOCALAPPDATA%\OMiK_VSM\data\ │
+    92→│  └─────────────────────────────┘                                  │
+    93→│                                                                   │
+    94→│  launcher.mjs / START.bat — поднимает оба процесса                │
+    95→└───────────────────────────────────────────────────────────────────┘
+    96→```
+    97→
+    98→### 2.2. Технологический стек
+    99→
+   100→| Категория | Технология | Версия | Назначение |
+   101→|-----------|-----------|--------|-----------|
+   102→| **Фреймворк** | Next.js (App Router) | 16.x | UI, API proxy, standalone |
+   103→| **Язык UI** | TypeScript | 5.x | Типобезопасность |
+   104→| **Runtime UI** | Bun / Node.js 20+ | — | Dev и production |
+   105→| **UI** | React | 19.x | Компонентная модель |
+   106→| **Стилизация** | Tailwind CSS | 4.x | Utility-first CSS |
+   107→| **Компоненты** | Shadcn/UI + Radix | — | Диалоги, tabs, toast и т.д. |
+   108→| **Иконки** | Lucide React | 0.525+ | SVG-иконки |
+   109→| **Состояние** | Zustand | 5.x | excel-store, auth-store, … |
+   110→| **Серверные данные** | TanStack Query | 5.x | Кеширование запросов |
+   111→| **Таблицы** | TanStack Table + Virtual | 8.x / 3.x | Сортировка, виртуализация |
+   112→| **ORM (метаданные)** | Prisma | 6.x | Session, ExcelFile, Macro, … |
+   113→| **БД** | SQLite (WAL) | — | `db/custom.db` (единая с Python) |
+   114→| **Excel (UI)** | SheetJS (xlsx) | 0.20.3 | Чтение на клиенте/edge |
+   115→| **Excel (backend)** | openpyxl, pandas, polars | — | Тяжёлая обработка |
+   116→| **Бэкенд** | FastAPI + uvicorn | — | Порт 3031, 1 worker |
+   117→| **Графики** | Recharts | 2.x | Дашборды |
+   118→| **Анимации** | Framer Motion | 12.x | Переходы |
+   119→| **Формы** | React Hook Form + Zod | 7.x / 4.x | Валидация |
+   120→| **Пароли** | bcryptjs / bcrypt | — | Хеши пользователей |
+   121→| **Очередь (опц.)** | Celery + Redis | — | `OMIK_USE_CELERY=1` |
+   122→| **Тесты** | Vitest, Playwright, pytest | — | Unit / e2e / Python |
+   123→| **Реверс-прокси (опц.)** | Caddy | — | HTTPS-шлюз |
+   124→
+   125→### 2.3. Ключевые архитектурные решения
+   126→
+   127→1. **Гибрид Next.js + Python FastAPI** — UI и сессии в Next.js; вся доменная логика Excel/SQLite — в `mini-services/excel-service/`. UI ходит только через `/api/excel/*`.
+   128→
+   129→2. **Единая SQLite `db/custom.db`** — Prisma и Python через `unified_db.py`. Логические имена реестра (например `employees`) переписываются в физические `{instance_id}_employees` (word-boundary).
+   130→
+   131→3. **Один worker uvicorn** — параллельные тяжёлые запросы встают в очередь; UI может «зависать», если с главной уходит лавина запросов.
+   132→
+   133→4. **Сессии в таблице `Session`** — не в JSON-файлах `.sessions/` (каталог может остаться legacy). Cookie `omik_session`, TTL порядка 8 часов.
+   134→
+   135→5. **Три уровня безопасности** — middleware cookie → проверка сессии/CSRF/RBAC в route handlers → `X-OMIK-Token` (= `OMIK_API_SECRET`) + role/sites в Python.
+   136→
+   137→6. **Keep-alive панелей** — при смене модуля панель `hidden`, а не unmount — сохраняется состояние и кэш.
+   138→
+   139→7. **Ленивая загрузка тяжёлых подвкладок** — в `DailyAccountingPanel`, `CandidatesPanel` грузится только активная подвкладка (цель перехода ~1 с).
+   140→
+   141→8. **Загрузки Excel** — `%LOCALAPPDATA%\OMiK_VSM\data\` (+ `upload/`). Очередь «Затрат по билетам» изолирована в `tickets_costs_vsm/sk.sqlite`, не из общего `upload/`.
+   142→
+   143→---
+   144→
+   145→## 3. Структура проекта
+   146→
+   147→```
+   148→C:\My_Project\omik-project\
+   149→│
+   150→├── .env.example / .env.local           # DATABASE_URL, OMIK_API_SECRET, EXCEL_BACKEND_URL
+   151→├── START.bat / STOP.bat                # Основной production-запуск / остановка
+   152→├── RESTART-EXCEL.bat                   # Перезапуск только excel-service
+   153→├── build-standalone.cmd                # next build + copy static/mini-services
+   154→├── INSTALL.bat                         # Первичная установка
+   155→├── launcher.mjs                        # Подъём Next :3000 + excel-service :3031
+   156→├── package.json                        # Зависимости и скрипты (v0.2.0)
+   157→├── next.config.ts                      # standalone output
+   158→├── Caddyfile                           # Опциональный HTTPS
+   159→├── AGENTS.md                           # Правила для AI/агентов
+   160→│
+   161→├── prisma/
+   162→│   └── schema.prisma                   # Session, ExcelFile, Macro, MacroRun, Operation, MainDatabase(legacy)
+   163→│
+   164→├── db/
+   165→│   └── custom.db                       # Единая SQLite (Prisma + Python)
+   166→│
+   167→├── upload/                             # Временные/загруженные Excel
+   168→├── attachments/                        # Вложения Outlook и пр.
+   169→├── download/
+   170→├── Utilites/                           # Внешние Python-утилиты (GUI и скрипты)
+   171→│
+   172→├── mini-services/
+   173→│   └── excel-service/                  # Python FastAPI бэкенд (АКТИВЕН)
+   174→│       ├── app.py                      # Точка входа FastAPI
+   175→│       ├── env_loader.py               # Загрузка OMIK_API_SECRET и env
+   176→│       ├── unified_db.py               # Единый доступ к custom.db
+   177→│       ├── main_db.py / main_db_registry.py
+   178→│       ├── daily_tracking.py / daily_validation.py / daily_merge.py
+   179→│       ├── sites_statistics.py
+   180→│       ├── employee_rules.py / employee_chronology.py / employee_identity.py
+   181→│       ├── hr_events_store.py
+   182→│       ├── tickets_costs.py / tickets_db.py
+   183→│       ├── calendar_db.py
+   184→│       ├── evaluations_db.py
+   185→│       ├── users_store.py / rbac.py / auth_middleware.py
+   186→│       ├── excel_handler.py / excel_libs.py / excel_reader.py
+   187→│       ├── data_merge.py / data_ops.py / file_prepare.py
+   188→│       ├── references.py / reports.py / vba_lab.py
+   189→│       ├── outlook_integration.py
+   190→│       ├── celery_app.py / celery_tasks.py / task_queue.py
+   191→│       ├── routers/
+   192→│       │   ├── daily.py
+   193→│       │   ├── jobs.py
+   194→│       │   └── references.py
+   195→│       └── requirements.txt / tests/
+   196→│
+   197→├── scripts/                            # copy-standalone и вспом. скрипты
+   198→├── .zscripts/                          # PowerShell/bat: verify, audit, start excel
+   199→├── docs/                               # Документация (этот файл — OMIK_DOCUMENTATION2.md)
+   200→│
+   201→└── src/
+   202→    ├── app/
+   203→    │   ├── page.tsx                    # MainInterface (корневой shell)
+   204→    │   ├── layout.tsx
+   205→    │   ├── globals.css
+   206→    │   └── api/excel/                  # ~80 route handlers → proxy :3031
+   207→    │       ├── auth/                   # login, me, csrf, change-password
+   208→    │       ├── main-db/
+   209→    │       ├── daily-tracking/
+   210→    │       ├── candidates/
+   211→    │       ├── today/
+   212→    │       ├── welcome-dashboard/
+   213→    │       ├── sites-stats/
+   214→    │       ├── hr-events/
+   215→    │       ├── tickets-costs/
+   216→    │       ├── tickets-registry/
+   217→    │       ├── calendar/
+   218→    │       ├── evaluations/
+   219→    │       ├── users/ / groups/
+   220→    │       ├── upload/ / files/
+   221→    │       ├── outlook/ / macro/ / merge/ …
+   222→    │       └── health/
+   223→    │
+   224→    ├── components/
+   225→    │   ├── home/                       # WelcomeScreen, MainInterface, KPI, reports
+   226→    │   ├── excel/                      # Все *Panel.tsx модулей
+   227→    │   ├── settings/                   # SettingsPanel + tabs
+   228→    │   ├── dashboard/                  # ExcelGrid, EmployeeCard, …
+   229→    │   ├── outlook/
+   230→    │   └── ui/                         # Shadcn primitives
+   231→    │
+   232→    ├── hooks/
+   233→    │   ├── use-welcome-dashboard.ts
+   234→    │   ├── use-sites-statistics.ts
+   235→    │   └── excel-api/                  # Клиентский API-слой
+   236→    │
+   237→    ├── lib/
+   238→    │   ├── home-modules.ts             # WELCOME_MODULE_CARDS
+   239→    │   ├── tab-data-cache.ts           # Кэш вкладок (fetch timeout 45 с)
+   240→    │   ├── api-paths.ts
+   241→    │   ├── excel-proxy / auth / csrf / session helpers
+   242→    │   └── utils.ts                    # formatDateDDMMYYYY и пр.
+   243→    │
+   244→    ├── middleware.ts                   # Cookie omik_session для /api/*
+   245→    │
+   246→    └── store/
+   247→        ├── excel-store.ts              # activeFile, navHistory, panelContext
+   248→        ├── auth-store.ts               # user, validated
+   249→        ├── main-db-store.ts
+   250→        └── activity-log-store.ts
+   251→```
+   252→
+   253→---
+   254→
+   255→## 4. База данных (Prisma + Unified SQLite)
+   256→
+   257→### 4.1. Подключение
+   258→
+   259→| Параметр | Значение |
+   260→|----------|----------|
+   261→| **Провайдер** | SQLite |
+   262→| **Файл** | `db/custom.db` |
+   263→| **Prisma URL (Windows)** | `DATABASE_URL=file:C:/My_Project/omik-project/db/custom.db` (**не** `file:/C:/...`) |
+   264→| **Python** | `OMIK_UNIFIED_DB` / `unified_db.py` |
+   265→| **Данные Excel** | `%LOCALAPPDATA%\OMiK_VSM\data\` (`OMIK_DATA_DIR`) |
+   266→
+   267→### 4.2. Модели Prisma
+   268→
+   269→#### Session — сессии пользователей
+   270→
+   271→| Поле | Тип | Описание |
+   272→|------|-----|----------|
+   273→| `id` | String (@id) | 64-char hex token (значение cookie) |
+   274→| `login` | String | Логин |
+   275→| `role` | String | Роль |
+   276→| `access` | String | Уровень доступа |
+   277→| `sites` | String | Площадки через запятую |
+   278→| `createdAt` | DateTime | Создание |
+   279→| `expiresAt` | DateTime | Истечение (индекс) |
+   280→
+   281→#### ExcelFile — реестр Excel в UI
+   282→
+   283→| Поле | Тип | Описание |
+   284→|------|-----|----------|
+   285→| `id` | String (cuid) | ID |
+   286→| `name` / `originalName` | String | Имена |
+   287→| `path` | String | Путь |
+   288→| `size` / `sheetCount` | Int | Метаданные |
+   289→| `isActive` | Boolean | Активен |
+   290→| `description` | String | Описание |
+   291→| Связи | `macros`, `operations` | Cascade |
+   292→
+   293→#### Macro / MacroRun — VBA/Python макросы и запуски
+   294→
+   295→| Модель | Ключевые поля |
+   296→|--------|----------------|
+   297→| Macro | `name`, `code`, `language` (vba/python), `fileId?`, `isGlobal` |
+   298→| MacroRun | `macroId`, `status`, `output`, `duration` |
+   299→
+   300→#### Operation — аудит операций над файлом
+   301→
+   302→| Поле | Описание |
+   303→|------|----------|
+   304→| `type` | sort, filter, merge, find_replace, pivot, … |
+   305→| `params` | JSON-строка |
+   306→| `status` | pending / completed / error |
+   307→| `fileId` | Связь с ExcelFile |
+   308→
+   309→#### MainDatabase — legacy-метаданные
+   310→
+   311→Модель в schema остаётся для совместимости; **реальные данные сотрудников** живут в Python-слое (`main_db.py`) в физических таблицах unified DB, не как строки Prisma.
+   312→
+   313→### 4.3. Где лежат рабочие данные (Python)
+   314→
+   315→| Реестр | Модуль | UI |
+   316→|--------|--------|-----|
+   317→| Основная БД сотрудников | `main_db.py`, `main_db_registry.py` | Сотрудники |
+   318→| Ежедневный учёт | `daily_tracking.py` | Ежедневный учёт, Welcome, Кандидаты, Площадки |
+   319→| HR-события / хронология | `hr_events_store.py`, `employee_chronology.py` | Хронология |
+   320→| Календарь | `calendar_db.py` | Календарь Прилет-Вылет |
+   321→| Билеты ВСМ/СК | `tickets_costs.py`, `tickets_db.py` | Затраты по билетам |
+   322→| Оценки | `evaluations_db.py` | Оценки сотрудников |
+   323→| Пользователи | `users_store.py` | Управление данными → Пользователи |
+   324→
+   325→**Важно:** «Очистить очередь загрузки» ≠ «Очистить реестр» (билеты). Очередь изолирована в `tickets_costs_vsm/sk.sqlite`.
+   326→
+   327→---
+   328→
+   329→## 5. Аутентификация и RBAC
+   330→
+   331→### 5.1. Поток входа
+   332→
+   333→```
+   334→Пользователь → AppLoginBar (Welcome)
+   335→  ↓ POST /api/excel/auth/login { login, password }
+   336→  ↓ bcrypt verify (users_store)
+   337→  ↓ создание Session в custom.db
+   338→  ↓ Cookie: omik_session
+   339→  ↓ GET /api/excel/auth/me → auth-store
+   340→  ↓ рендер модулей (только при isAuthed)
+   341→```
+   342→
+   343→Логин администратора: **`Admin`** (с заглавной **A**). При первом создании пароль пишется в `.first_admin_password`.
+   344→
+   345→### 5.2. Middleware и CSRF
+   346→
+   347→**Файл:** `src/middleware.ts`
+   348→
+   349→- Для `/api/*` требуется cookie сессии (исключения: login, health, публичные stubs).
+   350→- Мутации проверяют CSRF через `/api/excel/auth/csrf`.
+   351→
+   352→### 5.3. Прокси к Python
+   353→
+   354→Next.js добавляет заголовки:
+   355→
+   356→| Заголовок | Содержимое |
+   357→|-----------|------------|
+   358→| `X-OMIK-Token` | `OMIK_API_SECRET` (≥ 32 символа) |
+   359→| `X-OMIK-Role` | Роль из Session |
+   360→| `X-OMIK-Sites` | Список площадок пользователя |
+   361→
+   362→Python (`auth_middleware.py`, `rbac.py`) проверяет токен и фильтрует данные по роли/площадкам.
+   363→
+   364→### 5.4. Роли
+   365→
+   366→| Роль | Доступ |
+   367→|------|--------|
+   368→| **Administrator / Admin** | Полный доступ, пользователи, настройки |
+   369→| **ЦОК / COK / Manager** | Расширенный доступ к площадкам |
+   370→| **Viewer / обычный** | Только назначенные площадки |
+   371→
+   372→### 5.5. Пароль «Управление данными»
+   373→
+   374→Отдельный пароль настроек (файл `.settings.hash` / `settings-password.ts`) — **не путать** с логином приложения. Не сбрасывается при logout UI.
+   375→
+   376→---
+   377→
+   378→## 6. SQLite WAL и единая БД
+   379→
+   380→### 6.1. Unified DB
+   381→
+   382→**Файл:** `mini-services/excel-service/unified_db.py`
+   383→
+   384→- Prisma и Python открывают один `custom.db`.
+   385→- Реестр логических имён → физические таблицы с префиксом `instance_id`.
+   386→- `pandas.to_sql` — через raw `sqlite3` и **физическое** имя таблицы.
+   387→
+   388→### 6.2. WAL
+   389→
+   390→Для многопользовательского доступа рекомендуется WAL (readers не блокируют writers полностью). При экстремальной нагрузке возможны `database is locked` — excel-service работает с **одним worker**, что снижает конкурентную запись, но удлиняет очередь запросов.
+   391→
+   392→### 6.3. Данные вне custom.db
+   393→
+   394→Часть legacy/рабочих файлов остаётся в `%LOCALAPPDATA%\OMiK_VSM\data\` и постепенно мигрирует в unified-схему.
+   395→
+   396→---
+   397→
+   398→## 7. Python excel-service (FastAPI)
+   399→
+   400→### 7.1. Запуск
+   401→
+   402→| Параметр | Значение |
+   403→|----------|----------|
+   404→| Порт | **3031** |
+   405→| Хост | `127.0.0.1` |
+   406→| Workers | **1** (`UVICORN_WORKERS=1`) |
+   407→| Entrypoint | `app.py` + `env_loader.py` |
+   408→| Health | `/api/health` (проксируется с Next) |
+   409→| Перезапуск | `.\RESTART-EXCEL.bat` или `.zscripts\start_excel_service.py --force-restart` |
+   410→
+   411→### 7.2. Ключевые модули
+   412→
+   413→| Модуль | Назначение |
+   414→|--------|------------|
+   415→| `daily_tracking.py` | Ядро ежедневного учёта, welcome-dashboard, today, кандидаты |
+   416→| `sites_statistics.py` | Статистика по площадкам |
+   417→| `main_db.py` | Загрузка/статус/поиск основной БД |
+   418→| `employee_rules.py` | ПРАВИЛО_0, ПРАВИЛО_5 |
+   419→| `employee_chronology.py` | Сборка хронологий v4.1 |
+   420→| `hr_events_store.py` | Хранение HR-событий |
+   421→| `tickets_costs.py` | Затраты по билетам, jobs |
+   422→| `calendar_db.py` | Календарь |
+   423→| `evaluations_db.py` | Оценки |
+   424→| `rbac.py` | Фильтрация по роли/площадкам |
+   425→
+   426→### 7.3. Очередь задач
+   427→
+   428→- In-process `task_queue.py` / jobs API.
+   429→- Опционально Celery: `START-Celery.bat`, `bun run celery:worker`.
+   430→
+   431→---
+   432→
+   433→## 8. Кэш вкладок и производительность UI
+   434→
+   435→**Файл:** `src/lib/tab-data-cache.ts`
+   436→
+   437→| Параметр | Значение |
+   438→|----------|----------|
+   439→| TTL (типичный) | ~60 с |
+   440→| Timeout fetch | **45 с** |
+   441→| Инвалидация | `notifyDashboardRefresh()` после загрузки daily |
+   442→
+   443→**Правила UX (важно):**
+   444→
+   445→- Переход на вкладку — данные ≈ **1 с** (stale cache / lazy).
+   446→- В `DailyAccountingPanel`, `CandidatesPanel` — **только активная** подвкладка, без параллельной загрузки всех.
+   447→- На Welcome: `WelcomeActiveReports` ориентируется на `isPending`, не на `isFetching`.
+   448→
+   449→**Узкие места backend (типичные):**
+   450→
+   451→- Полные сканы daily (`limit` сотни тысяч) в Python-циклах.
+   452→- `get_at_home_rows` = полная БД + set on-site.
+   453→- Дублирование `useWelcomeDashboard` (Center + Sidebar).
+   454→- Лавина 4–5 запросов с главной при cold start.
+   455→
+   456→---
+   457→
+   458→## 9. Состояние приложения (Zustand Stores)
+   459→
+   460→### 9.1. excel-store
+   461→
+   462→**Файл:** `src/store/excel-store.ts`
+   463→
+   464→| Поле | Назначение |
+   465→|------|------------|
+   466→| `activeFile` | Текущий модуль или Excel-файл (`id`, panel kind) |
+   467→| `navHistory` | Стек «Назад» |
+   468→| `panelContext` | Контекст (например `siteName` для Площадок) |
+   469→| `files` / `sheets` | Spreadsheet-режим |
+   470→
+   471→Навигация: `navigateTo()`, `goBack()`, `openHomeModule()` в `src/lib/home-modules.ts`.
+   472→
+   473→### 9.2. auth-store
+   474→
+   475→**Файл:** `src/store/auth-store.ts` — `user`, `validated`; модули не рендерятся до успешной авторизации.
+   476→
+   477→### 9.3. Прочие
+   478→
+   479→- `main-db-store.ts` — статус/метаданные основной БД на клиенте.
+   480→- `activity-log-store.ts` — лог активности UI.
+   481→- Ticket costs: локальные store/cache (`ticketCostsCache.ts`, `ticketCostsLoadActionStore.ts`) — очередь загрузки не смешивается с общим upload.
+   482→
+   483→---
+   484→
+   485→## 10. Главный экран (Welcome) и модули
+   486→
+   487→### 10.1. Shell
+   488→
+   489→```
+   490→MainInterface
+   491→├── Не авторизован → WelcomeScreen + AppLoginBar
+   492→├── Авторизован, нет activeFile → WelcomeScreen
+   493→├── activeFile.id === 'settings' → SettingsPanel
+   494→├── activeFile → модуль (*Panel)
+   495→└── обычный Excel → Toolbar + SpreadsheetGrid + SheetTabs
+   496→```
+   497→
+   498→### 10.2. Три колонки Welcome
+   499→
+   500→| Колонка | Содержимое |
+   501→|---------|------------|
+   502→| **Левая** | Карточки модулей (`WelcomeModuleCard`), кнопки «Загрузить Excel», «Управление данными» |
+   503→| **Центр** | 4 KPI + `WelcomeActiveReports` (СВОД / Структура / На площадке / Дома / Кандидаты) |
+   504→| **Правая** | Площадки → клик открывает модуль «Площадки» с `siteName` |
+   505→
+   506→### 10.3. KPI
+   507→
+   508→Источник: `GET /api/excel/welcome-dashboard` → `daily_tracking.get_welcome_dashboard()`.
+   509→
+   510→| KPI | Смысл |
+   511→|-----|--------|
+   512→| **Действующие** | По Основной БД (статус «Действующий») |
+   513→| **На площадке** | Строки daily с «рабочим» табельным |
+   514→| **Кандидаты** | Таб. № = «Кандидат» (и синонимы) |
+   515→| **Дома** | Действующие, которых нет в множестве «на площадке» |
+   516→
+   517→### 10.4. Каталог модулей (`WELCOME_MODULE_CARDS`)
+   518→
+   519→| ID | Название | panel | Статус |
+   520→|----|----------|-------|--------|
+   521→| `main-db` | Сотрудники | `main-db` | ✅ |
+   522→| `module-tenure` | Кандидаты | `candidates` | ✅ |
+   523→| `module-daily-accounting` | Ежедневный учет | `daily-accounting` | ✅ |
+   524→| `calendar-module` | Календарь Прилет-Вылет | `calendar` | ✅ |
+   525→| `module-carnet` | Карнет | `placeholder` | 🚧 |
+   526→| `module-dismissed` | Отчет по Уволенному персоналу | `placeholder` | 🚧 |
+   527→| `module-hiring-costs` | Отчет по затратам на Трудоустройство | `placeholder` | 🚧 |
+   528→| `module-mobilization-plan` | Отчет/План Мобилизации ОП | `placeholder` | 🚧 |
+   529→| `module-utilities` | Utilites for all | `placeholder` | 🚧 |
+   530→| `data-merge` | Объединение данных | `data-merge` | ✅ |
+   531→| `ticket-costs` | Затраты по билетам | `ticket-costs` | ✅ |
+   532→| `gelendzhik-career` | Хронология Приёма, Перевода и Увольнения | `gelendzhik` | ✅ |
+   533→| `module-sites-stats` | Площадки | `sites-stats` | ✅ |
+   534→| `vba-laboratory` | Лаборатория VBA+PY | `vba-laboratory` | ✅ |
+   535→| `outlook` | Outlook Вложения | `outlook` | ✅ Windows |
+   536→| `evaluations` | Оценки сотрудников | `evaluations` | ✅ |
+   537→| `file-prepare` | Подготовка файла Excel | `file-prepare` | ✅ |
+   538→
+   539→---
+   540→
+   541→## 11. Вкладки и панели — подробное описание
+   542→
+   543→### 11.1. Сотрудники (`MainDatabasePanel`)
+   544→
+   545→**Файл:** `src/components/excel/MainDatabasePanel.tsx`
+   546→**API:** `/api/excel/main-db/*`
+   547→
+   548→- Режим **Данные:** таблица, поиск, фильтры, пагинация, экспорт.
+   549→- Режим **Отчеты** (`ReportsPanel`): Трудоустройство / Увольнения / Состав / Календарь.
+   550→- Загрузка БД: Управление данными → Основная База 1С **или** кнопка в модуле.
+   551→
+   552→### 11.2. Ежедневный учёт (`DailyAccountingPanel`)
+   553→
+   554→**Файл:** `src/components/excel/DailyAccountingPanel.tsx`
+   555→
+   556→| Подвкладка | API |
+   557→|------------|-----|
+   558→| На площадке | `/api/excel/daily-tracking/on-site` |
+   559→| Дома | `/api/excel/daily-tracking/at-home` (нужна Основная БД) |
+   560→| Статистика | `/api/excel/daily-tracking/statistics` |
+   561→
+   562→Файл загружается через **Управление данными → Ежедневный учёт** (не отдельной вкладкой «Файлы данных»).
+   563→
+   564→### 11.3. Кандидаты (`CandidatesPanel`)
+   565→
+   566→| Подвкладка | Описание |
+   567→|------------|----------|
+   568→| На сегодня | Кандидаты из daily |
+   569→| Дни оформления | Сопоставление с БД: **ФИО + дата рождения**, затем **паспорт** |
+   570→| Общая статистика | Агрегаты |
+   571→
+   572→API: `/api/excel/candidates?view=today|processing|general`
+   573→
+   574→### 11.4. Площадки (`SitesStatsPanel`)
+   575→
+   576→API: `/api/excel/sites-stats`
+   577→KPI + свод + детали: Гражданство / Приёмы / Увольнения. Контекст `panelContext.siteName` с Welcome.
+   578→
+   579→### 11.5. Хронология (`ChronologyPanel` / `GelendzhikCareerPanel`)
+   580→
+   581→Сегменты: ВСМ/СК, ВМ, ВМ-СМУ, Остальные, Общий.
+   582→API: `/api/excel/hr-events/chronology?segment=...`
+   583→Предварительно: Управление данными → **Приём, Перевод, Увольнение** (build).
+   584→
+   585→### 11.6. Затраты по билетам (`TicketCostsPanel`)
+   586→
+   587→Навигация: Dashboard | ВСМ | СК → внутри реестра: Отчёт / Загрузка.
+   588→API: `/api/excel/tickets-costs/*`
+   589→Очередь загрузки изолирована; «Очистить очередь» ≠ «Очистить реестр».
+   590→
+   591→### 11.7. Календарь (`CalendarPanel`)
+   592→
+   593→API: `/api/excel/calendar/*` — загрузка, просмотр, связь с Основной БД.
+   594→
+   595→### 11.8. Оценки (`EvaluationsPanel`)
+   596→
+   597→10 периодов (2024-1п … 2028-2п). Загрузка реестров в Settings. Сравнение: `/api/excel/evaluations/compare/[period]`.
+   598→
+   599→### 11.9. Прочие рабочие
+   600→
+   601→| Панель | Назначение |
+   602→|--------|------------|
+   603→| `DataMergePanel` | Объединение Excel с одинаковыми заголовками |
+   604→| `FilePreparePanel` | Листы, столбцы, формулы→значения |
+   605→| `VbaLaboratoryPanel` | Импорт/редактирование макросов |
+   606→| `OutlookPanel` | Почта COM (Windows) |
+   607→| `ModulePlaceholderPanel` | Заглушка «В разработке» |
+   608→
+   609→---
+   610→
+   611→## 12. Управление данными (Settings)
+   612→
+   613→**Файл:** `src/components/settings/SettingsPanel.tsx`
+   614→Открывается с Welcome → `activeFile.id = 'settings'`.
+   615→
+   616→| id | Название | Что делает |
+   617→|----|----------|------------|
+   618→| `base-1c` | Основная База 1С | Импорт выгрузки 1С |
+   619→| `refs-templates` | Справочники | Справочные Excel / шаблоны |
+   620→| `hr-events` | Приём, Перевод, Увольнение | Исходники хронологии |
+   621→| `daily-upload` | Ежедневный учёт | Excel по площадкам + дата |
+   622→| `sites` | Площадки | Статусы площадок в БД |
+   623→| `users-access` | Пользователи и доступ | Группы / роли / пользователи |
+   624→| `evaluations` | Реестры с оценками | Периоды оценок |
+   625→
+   626→Lazy mount: вкладка монтируется при первом посещении. UI/статус-бар «файлов данных» встраивается в эти подвкладки — **отдельная вкладка «Файлы данных» не создаётся**.
+   627→
+   628→---
+   629→
+   630→## 13. API-маршруты — справочник
+   631→
+   632→### 13.1. Схема
+   633→
+   634→```
+   635→UI  →  /api/excel/{path}  →  EXCEL_BACKEND_URL/api/{path}
+   636→         (+ session, CSRF, X-OMIK-*)
+   637→```
+   638→
+   639→### 13.2. Auth
+   640→
+   641→| Маршрут | Метод | Описание |
+   642→|---------|-------|----------|
+   643→| `/api/excel/auth/login` | POST | Вход |
+   644→| `/api/excel/auth/me` | GET | Текущий пользователь |
+   645→| `/api/excel/auth/csrf` | GET | CSRF-токен |
+   646→| `/api/excel/auth/change-password` | POST | Смена пароля |
+   647→
+   648→### 13.3. Доменные (ключевые)
+   649→
+   650→| UI | Next.js | Python (типично) |
+   651→|----|---------|------------------|
+   652→| Welcome KPI | `/api/excel/welcome-dashboard` | `/api/daily-tracking/welcome-dashboard` |
+   653→| СВОД / today | `/api/excel/today?view=` | `/api/daily-tracking/today` |
+   654→| Кандидаты | `/api/excel/candidates` | `/api/daily-tracking/candidates` |
+   655→| Ежедневный учёт | `/api/excel/daily-tracking/*` | `/api/daily-tracking/*` |
+   656→| Площадки | `/api/excel/sites-stats` | `/api/daily-tracking/sites-stats` |
+   657→| Сотрудники | `/api/excel/main-db` | `/api/main-db/*` |
+   658→| Хронология | `/api/excel/hr-events/chronology` | `/api/hr-events/chronology` |
+   659→| Билеты | `/api/excel/tickets-costs/*` | tickets_costs API |
+   660→| Календарь | `/api/excel/calendar` | calendar API |
+   661→| Оценки | `/api/excel/evaluations/*` | evaluations API |
+   662→| Пользователи | `/api/excel/users`, `/groups` | users_store |
+   663→| Health | `/api/excel/health` | `/api/health` |
+   664→
+   665→Полный список Next routes: `src/app/api/excel/**/route.ts`.
+   666→
+   667→---
+   668→
+   669→## 14. Бизнес-правила
+   670→
+   671→### 14.1. ПРАВИЛО_0 — статус сотрудника
+   672→
+   673→```
+   674→Если дата увольнения ≤ сегодня → «Уволен»
+   675→Иначе → «Действующий»
+   676→```
+   677→
+   678→Применяется при загрузке БД и ежедневном обновлении статуса.
+   679→
+   680→### 14.2. ПРАВИЛО_5 — компания по табельному
+   681→
+   682→| Префикс | Компания |
+   683→|---------|----------|
+   684→| ВСМ | ВелесстройМонтаж |
+   685→| ВС | Велесстрой |
+   686→| ВМ | ВелесстройМонтаж |
+   687→| ВУ | Велесстрой-СМУ |
+   688→| ГК | ГКК |
+   689→| СА | СМК |
+   690→| МВ | Стройконстракшен |
+   691→
+   692→### 14.3. Классификация daily
+   693→
+   694→| Категория | Условие |
+   695→|-----------|---------|
+   696→| **Кандидат** | Нормализованный таб. = «Кандидат» (сырьё: прием/приём/нелегал) |
+   697→| **На площадке** | Таб. ≥ 2 символов и не кандидат |
+   698→| **Дома** | Действующий в БД, таб. не в on-site за дату |
+   699→
+   700→### 14.4. Дни оформления
+   701→
+   702→1. ФИО + дата рождения
+   703→2. При неоднозначности — паспорт
+   704→3. Дата приёма для повторного оформления уволенных не сравнивается «вслепую» со старой датой
+   705→
+   706→### 14.5. Формат дат
+   707→
+   708→Отображение: **ДД.ММ.ГГГГ**. Парсинг: `%d.%m.%Y`, `%Y-%m-%d`, `%d/%m/%Y`.
+   709→
+   710→---
+   711→
+   712→## 15. Потоки данных и связи модулей
+   713→
+   714→### 15.1. Загрузка основной БД
+   715→
+   716→```
+   717→Settings Base1cTab → POST /api/excel/main-db (load)
+   718→→ main_db.py + employee_rules → unified tables
+   719→→ MainDatabasePanel / Welcome KPI / Дома / Площадки / Хронология
+   720→```
+   721→
+   722→### 15.2. Ежедневный учёт
+   723→
+   724→```
+   725→DailyUploadSettingsTab → upload Excel (площадка + дата)
+   726→→ daily_tracking → on-site / candidates / stats
+   727→→ WelcomeActiveReports + DailyAccountingPanel + CandidatesPanel + SitesStats
+   728→```
+   729→
+   730→### 15.3. Хронология
+   731→
+   732→```
+   733→HrEventsSettingsTab (Приём/Перевод/Увольнение) → build
+   734→→ hr_events_store + employee_chronology
+   735→→ ChronologyPanel (карточки сотрудников)
+   736→```
+   737→
+   738→### 15.4. Граф зависимостей (кратко)
+   739→
+   740→```
+   741→Основная БД ──► Действующие, Дома, Площадки, Отчёты, Хронология, сравнение Оценок
+   742→Ежедневный  ──► На площадке, Кандидаты, СВОД, Welcome KPI, SitesStats
+   743→HR-события  ──► Хронология
+   744→Билеты      ──► TicketCosts (очередь изолирована)
+   745→Календарь   ──► CalendarPanel (+ опц. связь с БД)
+   746→```
+   747→
+   748→### 15.5. Матрица «модуль → обязательные данные»
+   749→
+   750→| Модуль | Основная БД | Ежедневный учёт | Прочее |
+   751→|--------|:-----------:|:---------------:|--------|
+   752→| Главный экран | ✅ acting/дома | ✅ on-site/кандидаты | — |
+   753→| Сотрудники | ✅ | — | — |
+   754→| Ежедневный учёт | ✅ для «Дома» | ✅ | — |
+   755→| Кандидаты | ✅ оформление | ✅ | — |
+   756→| Площадки | ✅ | ✅ | — |
+   757→| Хронология | ✅ | — | ✅ HR build |
+   758→| Календарь | опц. | — | ✅ календарь |
+   759→| Билеты | опц. | — | ✅ реестры |
+   760→| Оценки | для сравнения | — | ✅ реестры |
+   761→
+   762→---
+   763→
+   764→## 16. Инфраструктура и развёртывание
+   765→
+   766→### Порты
+   767→
+   768→| Сервис | Порт | Статус |
+   769→|--------|------|--------|
+   770→| Next.js standalone | **3000** | ✅ (порт **не** берётся из `PORT` в `.env.local`) |
+   771→| excel-service | **3031** | ✅ обязателен |
+   772→| Caddy (опц.) | 8443 / иные | опционально |
+   773→| Celery worker | — | опционально |
+   774→
+   775→### Переменные окружения (обязательные)
+   776→
+   777→```bash
+   778→# Windows: прямые слеши!
+   779→DATABASE_URL=file:C:/My_Project/omik-project/db/custom.db
+   780→
+   781→EXCEL_BACKEND_URL=http://127.0.0.1:3031
+   782→EXCEL_SERVICE_URL=http://127.0.0.1:3031
+   783→
+   784→# ≥ 32 символов
+   785→OMIK_API_SECRET=................................
+   786→OMIK_SESSION_SECRET=................................
+   787→
+   788→# опционально
+   789→OMIK_UNIFIED_DB=C:/My_Project/omik-project/db/custom.db
+   790→OMIK_DATA_DIR=%LOCALAPPDATA%\OMiK_VSM\data
+   791→CORS_ORIGINS=http://127.0.0.1:3000,http://localhost:3000
+   792→UVICORN_WORKERS=1
+   793→```
+   794→
+   795→### Скрипты npm/bun
+   796→
+   797→| Команда | Описание |
+   798→|---------|----------|
+   799→| `bun run launcher` | `node launcher.mjs` |
+   800→| `bun run build` | Production build + copy-standalone |
+   801→| `bun run db:generate` / `db:push` | Prisma |
+   802→| `bun run test:unit` | Vitest |
+   803→| `bun run test:python` | pytest excel-service |
+   804→| `bun run verify:win` | Проверка Windows-окружения |
+   805→| `bun run e2e:tickets` | E2E API билетов |
+   806→
+   807→### Production workflow
+   808→
+   809→```bat
+   810→STOP.bat
+   811→.\build-standalone.cmd /force
+   812→START.bat
+   813→```
+   814→
+   815→Требования: `.env.local`, собранный `.next/standalone/server.js`.
+   816→
+   817→---
+   818→
+   819→## 17. Локальный запуск на Windows
+   820→
+   821→### 17.1. Требования
+   822→
+   823→- Windows 11
+   824→- Node.js 20+ или Bun
+   825→- Python 3.11+ (venv excel-service)
+   826→- Git
+   827→- **Без** sudo/root, **без** Docker/K8s/Podman
+   828→
+   829→### 17.2. Первый запуск
+   830→
+   831→```powershell
+   832→cd C:\My_Project\omik-project
+   833→
+   834→# 1. Установка
+   835→.\INSTALL.bat
+   836→
+   837→# 2. Окружение
+   838→copy .env.example .env.local
+   839→# Задать OMIK_API_SECRET (≥32), поправить DATABASE_URL на file:C:/...
+   840→
+   841→# 3. Prisma
+   842→bunx prisma generate
+   843→bunx prisma db push
+   844→
+   845→# 4. Сборка и старт
+   846→.\build-standalone.cmd
+   847→.\START.bat
+   848→```
+   849→
+   850→### 17.3. Ежедневная работа
+   851→
+   852→| Действие | Команда |
+   853→|----------|---------|
+   854→| Запуск | `.\START.bat` |
+   855→| Остановка | `.\STOP.bat` |
+   856→| Только excel-service | `.\RESTART-EXCEL.bat` |
+   857→| Dev UI | `bun run dev` + excel вручную |
+   858→| Пересборка UI/API | `.\STOP.bat` → `.\build-standalone.cmd /force` → `.\START.bat` |
+   859→
+   860→### 17.4. Доступ
+   861→
+   862→- URL: http://127.0.0.1:3000
+   863→- Логин: **Admin**
+   864→- Пароль: `.first_admin_password` при первом создании (далее — как задан в users)
+   865→
+   866→### 17.5. Типичные проблемы Windows
+   867→
+   868→| Проблема | Решение |
+   869→|----------|---------|
+   870→| `DATABASE_URL` с `file:/C:/` | Использовать `file:C:/...` |
+   871→| excel health fail | `.\RESTART-EXCEL.bat` (дважды при сбое) |
+   872→| UI после правок Python/UI | full rebuild `/force` после STOP |
+   873→| TLS/прокси | корпоративный прокси — см. LOCAL_SETUP.md |
+   874→
+   875→---
+   876→
+   877→## 18. Известные проблемы и ограничения
+   878→
+   879→### Производительность
+   880→
+   881→1. **Один worker uvicorn** — тяжёлые запросы сериализуются; UI может ждать минуты при лавине с Welcome.
+   882→2. **Полные сканы daily/main DB** в Python вместо SQL-агрегаций.
+   883→3. **Дубль welcome-dashboard** (Center + Sidebar) и несколько параллельных запросов ActiveReports.
+   884→4. **Кэш только in-memory** на вкладке браузера — после F5 cold start.
+   885→
+   886→### Функциональные
+   887→
+   888→5. **Часть карточек** — заглушки (Карнет, Уволенные, Затраты на трудоустройство, Мобилизация, Utilites).
+   889→6. **Outlook** — только Windows + установленный Outlook.
+   890→7. **Секреты** — без `OMIK_API_SECRET` excel-service не принимает проксированные запросы.
+   891→
+   892→### Архитектурные отличия от «VSM Node-only» ветки
+   893→
+   894→В отличие от документации `VSM_DOCUMENTATION2.md` (где FastAPI декомиссирован, а Excel в `excel-server.ts`):
+   895→
+   896→- в **omik-project** Python excel-service **активен и обязателен**;
+   897→- нет Worker Thread Pool / DuckDB / месячной архивации как в той ветке;
+   898→- auth — **своя Session-таблица**, не NextAuth.js.
+   899→
+   900→---
+   901→
+   902→## 19. Планы развития
+   903→
+   904→### Высокий приоритет
+   905→
+   906→- [ ] SQL-агрегации вместо `get_rows(limit=500_000)` для Welcome / Sites / Daily
+   907→- [ ] Единый `WelcomeDashboardProvider` (dedupe запросов)
+   908→- [ ] Stale-while-revalidate (sessionStorage / SWR) для мгновенного показа
+   909→- [ ] Строгая ленивость всех тяжёлых подвкладок (~1 с)
+   910→- [ ] Snapshot дашборда с TTL + инвалидация на upload
+   911→
+   912→### Средний
+   913→
+   914→- [ ] Доработка модулей-заглушек по приоритету бизнеса
+   915→- [ ] Дальнейшая миграция legacy SQLite из `%LOCALAPPDATA%` в unified
+   916→- [ ] Улучшение status-bar / информативности подвкладок Управления данными
+   917→- [ ] Расширение e2e (Playwright) на Daily / Candidates / Chronology
+   918→
+   919→### Низкий
+   920→
+   921→- [ ] Полная замена mock/placeholder модулей
+   922→- [ ] Опциональный HTTPS через Caddy в штатной инструкции
+   923→- [ ] Celery по умолчанию для фоновых jobs
+   924→
+   925→---
+   926→
+   927→## 20. Связанная документация
+   928→
+   929→| Файл | Содержание |
+   930→|------|------------|
+   931→| [ОПИСАНИЕ_ПРОЕКТА.md](ОПИСАНИЕ_ПРОЕКТА.md) | Краткий обзор |
+   932→| [ПОЛНОЕ_ОПИСАНИЕ_ПРОЕКТА.md](ПОЛНОЕ_ОПИСАНИЕ_ПРОЕКТА.md) | Детальное описание UI/API/зависимостей |
+   933→| [ARCHITECTURE.md](ARCHITECTURE.md) | Диаграммы архитектуры |
+   934→| [DATA_LAYER.md](DATA_LAYER.md) | Слой данных |
+   935→| [LOCAL_SETUP.md](LOCAL_SETUP.md) | Настройка окружения |
+   936→| [MONITORING.md](MONITORING.md) | Мониторинг |
+   937→| [../AGENTS.md](../AGENTS.md) | Правила для агентов |
+   938→| [../README.md](../README.md) | Быстрый старт |
+   939→| [../ЗАПУСК.md](../ЗАПУСК.md) / LAUNCH | Инструкция запуска |
+   940→
+   941→---
+   942→
+   943→## Приложение A. Чеклист «тупит при загрузке»
+   944→
+   945→1. Основная БД загружена? `/api/excel/main-db` → `loaded: true`
+   946→2. Есть дата daily? `welcome-dashboard.reportDate`
+   947→3. DevTools → Network: сколько параллельных запросов при открытии вкладки
+   948→4. Время `welcome-dashboard`, `sites-stats`, `today`, `candidates`
+   949→5. Если endpoint > 5 с — узкое место в Python (полные сканы)
+   950→6. После правок: `STOP.bat` → `.\build-standalone.cmd /force` → `START.bat`
+   951→7. Excel упал: сообщение «Дважды щёлкните RESTART-EXCEL.bat»
+   952→
+   953→---
+   954→
+   955→## Приложение B. Версия и метаданные
+   956→
+   957→| Параметр | Значение |
+   958→|----------|----------|
+   959→| package.json version | 0.2.0 |
+   960→| UI header | v1.0 |
+   961→| Next.js | 16.x |
+   962→| React | 19.x |
+   963→| Prisma | 6.x |
+   964→| Порт UI | 3000 |
+   965→| Порт excel-service | 3031 |
+   966→| Лицензия | Private (внутренний проект) |
+   967→| Дата документа | июль 2026 |
+   968→
+   969→---
+   970→
+   971→*Документация составлена по исходной кодовой базе `C:\My_Project\omik-project` в формате, аналогичном `VSM_DOCUMENTATION2.md`.
+   972→При изменении модулей обновляйте разделы 10–15 и приложения.*
+   973→
