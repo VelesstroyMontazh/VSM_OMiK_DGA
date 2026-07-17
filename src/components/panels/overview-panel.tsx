@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { Suspense, useEffect, useState, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import {
   Users,
@@ -23,6 +23,7 @@ import {
 } from 'recharts';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
+import DashboardOverview from '@/components/DashboardOverview';
 
 /* ── colour palettes ─────────────────────────────────────────── */
 const CITIZENSHIP_COLORS = [
@@ -158,6 +159,14 @@ export default function OverviewPanel() {
   /* ── render ─────────────────────────────────────────────────── */
   return (
     <div className="p-4 md:p-6 space-y-6">
+      {/* Warehouse SQLite (better-sqlite3) */}
+      <section className="space-y-2">
+        <h2 className="text-lg font-semibold tracking-tight">Data Warehouse</h2>
+        <Suspense fallback={<Skeleton className="h-64 w-full rounded-xl" />}>
+          <DashboardOverview />
+        </Suspense>
+      </section>
+
       <motion.div
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}

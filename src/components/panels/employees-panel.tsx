@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { Search, ChevronLeft, ChevronRight, Database } from 'lucide-react';
+import { useEmployeeProfileDialog } from '@/components/EmployeeDetailDialog';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -35,6 +36,16 @@ const PRIORITY_COLS = [
   'ФИО Полностью',
 ];
 
+function extractTabNumber(emp: EmployeeRecord): string | null {
+  for (const key of Object.keys(emp)) {
+    if (/таб/i.test(key) && emp[key]) {
+      const value = String(emp[key]).trim();
+      if (value && value !== '—') return value;
+    }
+  }
+  return null;
+}
+
 function getDisplayColumns(columns: string[], max: number = 10) {
   const priority = columns.filter((c) =>
     PRIORITY_COLS.some((p) => c.toLowerCase().includes(p.toLowerCase()))
@@ -59,6 +70,7 @@ function TableSkeleton() {
 
 /* ── main component ──────────────────────────────────────────── */
 export default function EmployeesPanel() {
+  const { openProfile, dialog } = useEmployeeProfileDialog();
   const [data, setData] = useState<EmployeesResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -118,6 +130,7 @@ export default function EmployeesPanel() {
 
   return (
     <div className="p-4 md:p-6 space-y-6">
+      {dialog}
       <motion.div
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
@@ -185,10 +198,13 @@ export default function EmployeesPanel() {
                       </tr>
                     </thead>
                     <tbody>
-                      {employees.map((emp, rowIdx) => (
+                      {employees.map((emp, rowIdx) => {
+                        const tab = extractTabNumber(emp);
+                        return (
                         <tr
                           key={rowIdx}
-                          className="border-b transition-colors hover:bg-muted/40 even:bg-muted/20"
+                          className={`border-b transition-colors even:bg-muted/20 ${tab ? 'cursor-pointer hover:bg-muted/40' : ''}`}
+                          onClick={() => tab && openProfile(tab)}
                         >
                           <td className="whitespace-nowrap px-3 py-2 text-xs text-muted-foreground tabular-nums">
                             {rangeStart + rowIdx}
@@ -203,7 +219,8 @@ export default function EmployeesPanel() {
                             </td>
                           ))}
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>

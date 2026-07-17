@@ -2,8 +2,8 @@ import { create } from 'zustand';
 
 export type TabId =
   | 'overview' | 'employees' | 'today' | 'candidates' | 'sites'
-  | 'chronology' | 'dynamics' | 'migration' | 'discrepancies' | 'files'
-  | 'tickets' | 'calendar' | 'ratings' | 'settings';
+  | 'chronology' | 'dynamics' | 'hr-movement' | 'kpi' | 'migration' | 'discrepancies' | 'files'
+  | 'tickets' | 'calendar' | 'ratings' | 'admin' | 'settings';
 
 interface AppState {
   activeTab: TabId;

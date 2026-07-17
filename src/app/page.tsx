@@ -4,9 +4,9 @@ import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   LayoutDashboard, Users, CalendarCheck, UserPlus, Building2,
-  History, TrendingUp, Plane, FileSpreadsheet, Settings,
+  History, TrendingUp, Plane, FileSpreadsheet, Settings, Activity, Star,
   ChevronLeft, ChevronRight, LogOut, Moon, Sun, Leaf, Menu,
-  Bell, Clock, Shield,
+  Bell, Clock, Shield, Ticket,
 } from 'lucide-react';
 import { useTheme } from 'next-themes';
 import { useAppStore, type TabId } from '@/store/use-app-store';
@@ -25,6 +25,10 @@ const TodayPanel = dynamic(() => import('@/components/panels/today-panel'), { ss
 const FilesPanel = dynamic(() => import('@/components/panels/files-panel'), { ssr: false });
 const DynamicsPanel = dynamic(() => import('@/components/panels/dynamics-panel'), { ssr: false });
 const ChronologyPanel = dynamic(() => import('@/components/panels/chronology-panel'), { ssr: false });
+const HrMovementPanel = dynamic(() => import('@/components/panels/hr-movement-panel'), { ssr: false });
+const KpiPanel = dynamic(() => import('@/components/panels/kpi-panel'), { ssr: false });
+const TicketsPanel = dynamic(() => import('@/components/panels/tickets-panel'), { ssr: false });
+const AdminPanel = dynamic(() => import('@/components/panels/admin-panel'), { ssr: false });
 
 interface NavItem {
   id: TabId;
@@ -42,8 +46,12 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'sites', label: 'Площадки', icon: Building2, group: 'Аналитика' },
   { id: 'chronology', label: 'Хронология', icon: History, group: 'Данные' },
   { id: 'dynamics', label: 'Динамика', icon: TrendingUp, group: 'Данные' },
+  { id: 'hr-movement', label: 'HR Движение', icon: Activity, group: 'Данные' },
+  { id: 'kpi', label: 'KPI / Оценки', icon: Star, group: 'Данные' },
+  { id: 'tickets', label: 'Билеты', icon: Ticket, group: 'Данные' },
   { id: 'migration', label: 'Миграция', icon: Plane, group: 'Данные' },
   { id: 'files', label: 'Файлы данных', icon: FileSpreadsheet, group: 'Система' },
+  { id: 'admin', label: 'Админка', icon: Shield, group: 'Система' },
   { id: 'settings', label: 'Настройки', icon: Settings, group: 'Система' },
 ];
 
@@ -112,6 +120,10 @@ export default function DashboardPage() {
       case 'files': return <FilesPanel />;
       case 'dynamics': return <DynamicsPanel />;
       case 'chronology': return <ChronologyPanel />;
+      case 'hr-movement': return <HrMovementPanel />;
+      case 'kpi': return <KpiPanel />;
+      case 'tickets': return <TicketsPanel />;
+      case 'admin': return <AdminPanel />;
       case 'candidates':
         return (
           <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="p-4 md:p-6 space-y-6">

@@ -21,6 +21,7 @@ import {
 } from '@/components/ui/select';
 import { Progress } from '@/components/ui/progress';
 import { toast } from 'sonner';
+import { useAppStore } from '@/store/use-app-store';
 
 /* ── types ───────────────────────────────────────────────────── */
 interface FileRecord {
@@ -89,6 +90,7 @@ function formatDate(iso: string): string {
 
 /* ── main component ──────────────────────────────────────────── */
 export default function FilesPanel() {
+  const setDbLoaded = useAppStore((s) => s.setDbLoaded);
   const [files, setFiles] = useState<FileRecord[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
@@ -170,15 +172,31 @@ export default function FilesPanel() {
     }
   };
 
-  /* activate base file */
+  /* activate base file → load into in-memory employee cache */
   const handleActivate = async (file: FileRecord) => {
     try {
       setActivatingId(file.id);
-      // In a real implementation, you'd POST to an activation endpoint
-      // For now just show a toast
-      toast.success(`Файл «${file.originalName}» активирован как базовый`);
-    } catch {
-      toast.error('Не удалось активировать файл');
+      const res = await fetch('/api/main-db/load', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileId: file.id }),
+      });
+      const json = (await res.json()) as {
+        success?: boolean;
+        rows?: number;
+        fileName?: string;
+        error?: string;
+      };
+      if (!res.ok) {
+        throw new Error(json.error || `HTTP ${res.status}`);
+      }
+      setDbLoaded(true, json.rows ?? file.totalRows);
+      toast.success(
+        `База «${json.fileName ?? file.originalName}» активирована (${(json.rows ?? 0).toLocaleString('ru-RU')} строк)`,
+      );
+      await fetchFiles();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Не удалось активировать файл');
     } finally {
       setActivatingId(null);
     }
@@ -227,7 +245,7 @@ export default function FilesPanel() {
                   accept=".xlsx,.xls,.csv"
                   onChange={handleFileChange}
                   disabled={uploading}
-                  className="block w-full text-sm text-muted-foreground file:mr-4 file:rounded-md file:border-0 file:bg-primary file:px-4 file:py-2 file:text-xs file:font-medium file:text-primary-foreground hover:file:bg-primary/90 file:cursor-pointer file:disabled:opacity-50"
+                  className="block w-full text-sm text-muted-foreground file:mr-4 file:rounded-md file:border-0 file:bg-primary file:px-4 file:py-2 file:text-xs file:font-medium file:text-primary-foreground hover:file:bg-primary/90 file:cursor-pointer"
                 />
               </div>
             </div>
@@ -307,10 +325,10 @@ export default function FilesPanel() {
                           <span>{formatDate(file.loadedAt)}</span>
                         </div>
                       </div>
-                      {file.category === 'base' && !file.isActive && (
+                      {file.category === 'base' && (
                         <Button
                           size="sm"
-                          variant="outline"
+                          variant={file.isActive ? 'secondary' : 'outline'}
                           className="mt-3 w-full"
                           disabled={activatingId === file.id}
                           onClick={() => handleActivate(file)}
@@ -320,7 +338,7 @@ export default function FilesPanel() {
                           ) : (
                             <Upload className="mr-1.5 h-3.5 w-3.5" />
                           )}
-                          Активировать
+                          {file.isActive ? 'Перезагрузить' : 'Активировать'}
                         </Button>
                       )}
                     </Card>
