@@ -154,6 +154,12 @@
   body {
     @apply bg-background text-foreground;
   }
+  [data-slot="input"]:disabled,
+  input[type="file"]:disabled {
+    pointer-events: none;
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
 }
 
 /* Scrollbar */
